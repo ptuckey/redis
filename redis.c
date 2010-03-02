@@ -61,6 +61,7 @@
 #include <limits.h>
 #include <math.h>
 #include <pthread.h>
+#include <syslog.h>
 
 #if defined(__sun)
 #include "solarisfixes.h"
@@ -225,6 +226,48 @@
 #define redisAssert(_e) ((_e)?(void)0 : (_redisAssert(#_e,__FILE__,__LINE__),_exit(1)))
 static void _redisAssert(char *estr, char *file, int line);
 
+/* Maximum log message length */
+#define MAX_LOG_LEN 8192
+
+typedef struct _code {
+    char *c_name;
+    int c_val;
+} SYSLOG_CODE;
+
+static const SYSLOG_CODE syslog_codes[] = {
+#ifdef LOG_DAEMON
+    { "daemon",     LOG_DAEMON },
+#endif
+#ifdef LOG_USER
+    { "user",       LOG_USER },
+#endif
+#ifdef LOG_LOCAL0
+    { "local0",     LOG_LOCAL0 },
+#endif
+#ifdef LOG_LOCAL1
+    { "local1",     LOG_LOCAL1 },
+#endif
+#ifdef LOG_LOCAL2
+    { "local2",     LOG_LOCAL2 },
+#endif
+#ifdef LOG_LOCAL3
+    { "local3",     LOG_LOCAL3 },
+#endif
+#ifdef LOG_LOCAL4
+    { "local4",     LOG_LOCAL4 },
+#endif
+#ifdef LOG_LOCAL5
+    { "local5",     LOG_LOCAL5 },
+#endif
+#ifdef LOG_LOCAL6
+    { "local6",     LOG_LOCAL6 },
+#endif
+#ifdef LOG_LOCAL7
+    { "local7",     LOG_LOCAL7 },
+#endif
+    { NULL,  -1 }
+};
+
 /*================================= Data types ============================== */
 
 /* A redis object, that is a type able to hold a string / list / set */
@@ -357,6 +400,8 @@ struct redisServer {
     sds bgrewritebuf; /* buffer taken by parent during oppend only rewrite */
     struct saveparam *saveparams;
     int saveparamslen;
+    int usesyslog;
+    int syslogfacility;
     char *logfile;
     char *bindaddr;
     char *dbfilename;
@@ -875,27 +920,34 @@ int stringmatchlen(const char *pattern, int patternLen,
 
 static void redisLog(int level, const char *fmt, ...) {
     va_list ap;
+    char msg[MAX_LOG_LEN];
     FILE *fp;
 
-    fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
-    if (!fp) return;
-
-    va_start(ap, fmt);
     if (level >= server.verbosity) {
-        char *c = ".-*#";
-        char buf[64];
-        time_t now;
+        va_start(ap, fmt);
+        vsnprintf(msg, sizeof(msg), fmt, ap);
+        va_end(ap);
 
-        now = time(NULL);
-        strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
-        fprintf(fp,"[%d] %s %c ",(int)getpid(),buf,c[level]);
-        vfprintf(fp, fmt, ap);
-        fprintf(fp,"\n");
-        fflush(fp);
+        fp = (server.logfile == NULL) ? stdout : fopen(server.logfile, "a");
+        if (fp) {
+            char *c = ".-*#";
+            char buf[64];
+            time_t now;
+
+            now = time(NULL);
+            strftime(buf, 64, "%d %b %H:%M:%S", localtime(&now));
+
+            fprintf(fp, "[%d] %s %c %s\n", (int) getpid(), buf, c[level], msg);
+            fflush(fp);
+
+            if (server.logfile) fclose(fp);
+        }
+
+        if (server.usesyslog) {
+            int levels[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING};
+            syslog(levels[level], "%s", msg);
+        }
     }
-    va_end(ap);
-
-    if (server.logfile) fclose(fp);
 }
 
 /*====================== Hash table type implementation  ==================== */
@@ -1416,6 +1468,8 @@ static void initServerConfig() {
     server.maxidletime = REDIS_MAXIDLETIME;
     server.saveparams = NULL;
     server.logfile = NULL; /* NULL = log on standard output */
+    server.usesyslog = 0;
+    server.syslogfacility = LOG_LOCAL1;
     server.bindaddr = NULL;
     server.glueoutputbuf = 1;
     server.daemonize = 0;
@@ -1468,6 +1522,8 @@ static void initServer() {
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
+
+    if (server.usesyslog) openlog("redis", LOG_NDELAY|LOG_PID, server.syslogfacility);
 
     server.devnull = fopen("/dev/null","w");
     if (server.devnull == NULL) {
@@ -1608,6 +1664,25 @@ static void loadServerConfig(char *filename) {
             else if (!strcasecmp(argv[1],"warning")) server.verbosity = REDIS_WARNING;
             else {
                 err = "Invalid log level. Must be one of debug, notice, warning";
+                goto loaderr;
+            }
+        } else if (!strcasecmp(argv[0],"usesyslog") && argc == 2) {
+            if ((server.usesyslog = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
+        } else if (!strcasecmp(argv[0],"syslogfacility") && argc == 2) {
+            const SYSLOG_CODE *code;
+
+	    for (code = syslog_codes; code->c_name; code++) {
+                if (!strcasecmp(code->c_name, argv[1])) {
+                    server.syslogfacility = code->c_val;
+                    break;
+                }
+            }
+
+            if (!code->c_name) {
+                err = sdscatprintf(sdsempty(),
+                    "Unknown syslog facility: %s", argv[1]);
                 goto loaderr;
             }
         } else if (!strcasecmp(argv[0],"logfile") && argc == 2) {
@@ -8338,7 +8413,7 @@ static void daemonize(void) {
 
     /* Every output goes to /dev/null. If Redis is daemonized but
      * the 'logfile' is set to 'stdout' in the configuration file
-     * it will not log at all. */
+     * it will not log at all unless logging to syslog is turned on. */
     if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
         dup2(fd, STDIN_FILENO);
         dup2(fd, STDOUT_FILENO);
