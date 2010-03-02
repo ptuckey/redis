@@ -953,7 +953,7 @@ static void redisLog(int level, const char *fmt, ...) {
 /*====================== Hash table type implementation  ==================== */
 
 /* This is an hash table type that uses the SDS dynamic strings libary as
- * keys and radis objects as values (objects can hold SDS strings,
+ * keys and redis objects as values (objects can hold SDS strings,
  * lists, sets). */
 
 static void dictVanillaFree(void *privdata, void *val)
