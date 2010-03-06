@@ -76,6 +76,7 @@
 #include "zmalloc.h" /* total memory usage aware version of malloc/free */
 #include "lzf.h"    /* LZF compression library */
 #include "pqsort.h" /* Partial qsort for SORT+LIMIT */
+#include "zipmap.h"
 
 /* Error codes */
 #define REDIS_OK                0
@@ -119,9 +120,13 @@
 #define REDIS_ZSET 3
 #define REDIS_HASH 4
 
-/* Objects encoding */
+/* Objects encoding. Some kind of objects like Strings and Hashes can be
+ * internally represented in multiple ways. The 'encoding' field of the object
+ * is set to one of this fields for this object. */
 #define REDIS_ENCODING_RAW 0    /* Raw representation */
 #define REDIS_ENCODING_INT 1    /* Encoded as integer */
+#define REDIS_ENCODING_ZIPMAP 2 /* Encoded as zipmap */
+#define REDIS_ENCODING_HT 3     /* Encoded as an hash table */
 
 /* Object types only used for dumping to disk */
 #define REDIS_EXPIRETIME 253
@@ -501,6 +506,7 @@ typedef struct _redisSortOperation {
 typedef struct zskiplistNode {
     struct zskiplistNode **forward;
     struct zskiplistNode *backward;
+    unsigned int *span;
     double score;
     robj *obj;
 } zskiplistNode;
@@ -703,6 +709,10 @@ static void discardCommand(redisClient *c);
 static void blpopCommand(redisClient *c);
 static void brpopCommand(redisClient *c);
 static void appendCommand(redisClient *c);
+static void substrCommand(redisClient *c);
+static void zrankCommand(redisClient *c);
+static void hsetCommand(redisClient *c);
+static void hgetCommand(redisClient *c);
 
 /*================================= Globals ================================= */
 
@@ -713,6 +723,7 @@ static struct redisCommand cmdTable[] = {
     {"set",setCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,0,0,0},
     {"setnx",setnxCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,0,0,0},
     {"append",appendCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,1,1,1},
+    {"substr",substrCommand,4,REDIS_CMD_INLINE,1,1,1},
     {"del",delCommand,-2,REDIS_CMD_INLINE,0,0,0},
     {"exists",existsCommand,2,REDIS_CMD_INLINE,1,1,1},
     {"incr",incrCommand,2,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,1,1,1},
@@ -755,6 +766,9 @@ static struct redisCommand cmdTable[] = {
     {"zrevrange",zrevrangeCommand,-4,REDIS_CMD_INLINE,1,1,1},
     {"zcard",zcardCommand,2,REDIS_CMD_INLINE,1,1,1},
     {"zscore",zscoreCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,1,1,1},
+    {"zrank",zrankCommand,3,REDIS_CMD_INLINE,1,1,1},
+    {"hset",hsetCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,1,1,1},
+    {"hget",hgetCommand,3,REDIS_CMD_BULK,1,1,1},
     {"incrby",incrbyCommand,3,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,1,1,1},
     {"decrby",decrbyCommand,3,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,1,1,1},
     {"getset",getsetCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,1,1,1},
@@ -1058,7 +1072,7 @@ static dictType zsetDictType = {
 };
 
 /* Db->dict */
-static dictType hashDictType = {
+static dictType dbDictType = {
     dictObjHash,                /* hash function */
     NULL,                       /* key dup */
     NULL,                       /* val dup */
@@ -1075,6 +1089,16 @@ static dictType keyptrDictType = {
     dictObjKeyCompare,         /* key compare */
     dictRedisObjectDestructor, /* key destructor */
     NULL                       /* val destructor */
+};
+
+/* Hash type hash table (note that small hashes are represented with zimpaps) */
+static dictType hashDictType = {
+    dictEncObjHash,             /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictEncObjKeyCompare,       /* key compare */
+    dictRedisObjectDestructor,  /* key destructor */
+    dictRedisObjectDestructor   /* val destructor */
 };
 
 /* Keylist hash table type has unencoded redis objects as keys and
@@ -1544,7 +1568,7 @@ static void initServer() {
         exit(1);
     }
     for (j = 0; j < server.dbnum; j++) {
-        server.db[j].dict = dictCreate(&hashDictType,NULL);
+        server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
         server.db[j].blockingkeys = dictCreate(&keylistDictType,NULL);
         if (server.vm_enabled)
@@ -2613,6 +2637,16 @@ static robj *createSetObject(void) {
     return createObject(REDIS_SET,d);
 }
 
+static robj *createHashObject(void) {
+    /* All the Hashes start as zipmaps. Will be automatically converted
+     * into hash tables if there are enough elements or big elements
+     * inside. */
+    unsigned char *zm = zipmapNew();
+    robj *o = createObject(REDIS_HASH,zm);
+    o->encoding = REDIS_ENCODING_ZIPMAP;
+    return o;
+}
+
 static robj *createZsetObject(void) {
     zset *zs = zmalloc(sizeof(*zs));
 
@@ -3606,7 +3640,7 @@ static void setGenericCommand(redisClient *c, int nx) {
              * to overwrite the old. So we delete the old key in the database.
              * This will also make sure that swap pages about the old object
              * will be marked as free. */
-            if (deleteIfSwapped(c->db,c->argv[1]))
+            if (server.vm_enabled && deleteIfSwapped(c->db,c->argv[1]))
                 incrRefCount(c->argv[1]);
             dictReplace(c->db->dict,c->argv[1],c->argv[2]);
             incrRefCount(c->argv[2]);
@@ -3834,6 +3868,50 @@ static void appendCommand(redisClient *c) {
     }
     server.dirty++;
     addReplySds(c,sdscatprintf(sdsempty(),":%lu\r\n",(unsigned long)totlen));
+}
+
+static void substrCommand(redisClient *c) {
+    robj *o;
+    long start = atoi(c->argv[2]->ptr);
+    long end = atoi(c->argv[3]->ptr);
+
+    o = lookupKeyRead(c->db,c->argv[1]);
+    if (o == NULL) {
+        addReply(c,shared.nullbulk);
+    } else {
+        if (o->type != REDIS_STRING) {
+            addReply(c,shared.wrongtypeerr);
+        } else {
+            size_t rangelen, strlen;
+            sds range;
+
+            o = getDecodedObject(o);
+            strlen = sdslen(o->ptr);
+
+            /* convert negative indexes */
+            if (start < 0) start = strlen+start;
+            if (end < 0) end = strlen+end;
+            if (start < 0) start = 0;
+            if (end < 0) end = 0;
+
+            /* indexes sanity checks */
+            if (start > end || (size_t)start >= strlen) {
+                /* Out of range start or start > end result in null reply */
+                addReply(c,shared.nullbulk);
+                decrRefCount(o);
+                return;
+            }
+            if ((size_t)end >= strlen) end = strlen-1;
+            rangelen = (end-start)+1;
+
+            /* Return the result */
+            addReplySds(c,sdscatprintf(sdsempty(),"$%lu\r\n",rangelen));
+            range = sdsnewlen((char*)o->ptr+start,rangelen);
+            addReplySds(c,range);
+            addReply(c,shared.crlf);
+            decrRefCount(o);
+        }
+    }
 }
 
 /* ========================= Type agnostic commands ========================= */
@@ -4101,7 +4179,7 @@ static void pushGenericCommand(redisClient *c, int where) {
     lobj = lookupKeyWrite(c->db,c->argv[1]);
     if (lobj == NULL) {
         if (handleClientsWaitingListPush(c,c->argv[1],c->argv[2])) {
-            addReply(c,shared.ok);
+            addReply(c,shared.cone);
             return;
         }
         lobj = createListObject();
@@ -4120,7 +4198,7 @@ static void pushGenericCommand(redisClient *c, int where) {
             return;
         }
         if (handleClientsWaitingListPush(c,c->argv[1],c->argv[2])) {
-            addReply(c,shared.ok);
+            addReply(c,shared.cone);
             return;
         }
         list = lobj->ptr;
@@ -4132,7 +4210,7 @@ static void pushGenericCommand(redisClient *c, int where) {
         incrRefCount(c->argv[2]);
     }
     server.dirty++;
-    addReply(c,shared.ok);
+    addReplySds(c,sdscatprintf(sdsempty(),":%d\r\n",listLength(list)));
 }
 
 static void lpushCommand(redisClient *c) {
@@ -4870,6 +4948,8 @@ static zskiplistNode *zslCreateNode(int level, double score, robj *obj) {
     zskiplistNode *zn = zmalloc(sizeof(*zn));
 
     zn->forward = zmalloc(sizeof(zskiplistNode*) * level);
+    if (level > 0)
+        zn->span = zmalloc(sizeof(unsigned int) * (level - 1));
     zn->score = score;
     zn->obj = obj;
     return zn;
@@ -4883,8 +4963,13 @@ static zskiplist *zslCreate(void) {
     zsl->level = 1;
     zsl->length = 0;
     zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
-    for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++)
+    for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
         zsl->header->forward[j] = NULL;
+
+        /* span has space for ZSKIPLIST_MAXLEVEL-1 elements */
+        if (j < ZSKIPLIST_MAXLEVEL-1)
+            zsl->header->span[j] = 0;
+    }
     zsl->header->backward = NULL;
     zsl->tail = NULL;
     return zsl;
@@ -4893,6 +4978,7 @@ static zskiplist *zslCreate(void) {
 static void zslFreeNode(zskiplistNode *node) {
     decrRefCount(node->obj);
     zfree(node->forward);
+    zfree(node->span);
     zfree(node);
 }
 
@@ -4900,6 +4986,7 @@ static void zslFree(zskiplist *zsl) {
     zskiplistNode *node = zsl->header->forward[0], *next;
 
     zfree(zsl->header->forward);
+    zfree(zsl->header->span);
     zfree(zsl->header);
     while(node) {
         next = node->forward[0];
@@ -4918,15 +5005,21 @@ static int zslRandomLevel(void) {
 
 static void zslInsert(zskiplist *zsl, double score, robj *obj) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
     x = zsl->header;
     for (i = zsl->level-1; i >= 0; i--) {
+        /* store rank that is crossed to reach the insert position */
+        rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+
         while (x->forward[i] &&
             (x->forward[i]->score < score ||
                 (x->forward[i]->score == score &&
-                compareStringObjects(x->forward[i]->obj,obj) < 0)))
+                compareStringObjects(x->forward[i]->obj,obj) < 0))) {
+            rank[i] += i > 0 ? x->span[i-1] : 1;
             x = x->forward[i];
+        }
         update[i] = x;
     }
     /* we assume the key is not already inside, since we allow duplicated
@@ -4935,15 +5028,30 @@ static void zslInsert(zskiplist *zsl, double score, robj *obj) {
      * if the element is already inside or not. */
     level = zslRandomLevel();
     if (level > zsl->level) {
-        for (i = zsl->level; i < level; i++)
+        for (i = zsl->level; i < level; i++) {
+            rank[i] = 0;
             update[i] = zsl->header;
+            update[i]->span[i-1] = zsl->length;
+        }
         zsl->level = level;
     }
     x = zslCreateNode(level,score,obj);
     for (i = 0; i < level; i++) {
         x->forward[i] = update[i]->forward[i];
         update[i]->forward[i] = x;
+
+        /* update span covered by update[i] as x is inserted here */
+        if (i > 0) {
+            x->span[i-1] = update[i]->span[i-1] - (rank[0] - rank[i]);
+            update[i]->span[i-1] = (rank[0] - rank[i]) + 1;
+        }
     }
+
+    /* increment span for untouched levels */
+    for (i = level; i < zsl->level; i++) {
+        update[i]->span[i-1]++;
+    }
+
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
     if (x->forward[0])
         x->forward[0]->backward = x;
@@ -4971,12 +5079,19 @@ static int zslDelete(zskiplist *zsl, double score, robj *obj) {
     x = x->forward[0];
     if (x && score == x->score && compareStringObjects(x->obj,obj) == 0) {
         for (i = 0; i < zsl->level; i++) {
-            if (update[i]->forward[i] != x) break;
-            update[i]->forward[i] = x->forward[i];
+            if (update[i]->forward[i] == x) {
+                if (i > 0) {
+                    update[i]->span[i-1] += x->span[i-1] - 1;
+                }
+                update[i]->forward[i] = x->forward[i];
+            } else {
+                /* invariant: i > 0, because update[0]->forward[0]
+                 * is always equal to x */
+                update[i]->span[i-1] -= 1;
+            }
         }
         if (x->forward[0]) {
-            x->forward[0]->backward = (x->backward == zsl->header) ?
-                                        NULL : x->backward;
+            x->forward[0]->backward = x->backward;
         } else {
             zsl->tail = x->backward;
         }
@@ -5013,12 +5128,19 @@ static unsigned long zslDeleteRange(zskiplist *zsl, double min, double max, dict
         zskiplistNode *next;
 
         for (i = 0; i < zsl->level; i++) {
-            if (update[i]->forward[i] != x) break;
-            update[i]->forward[i] = x->forward[i];
+            if (update[i]->forward[i] == x) {
+                if (i > 0) {
+                    update[i]->span[i-1] += x->span[i-1] - 1;
+                }
+                update[i]->forward[i] = x->forward[i];
+            } else {
+                /* invariant: i > 0, because update[0]->forward[0]
+                 * is always equal to x */
+                update[i]->span[i-1] -= 1;
+            }
         }
         if (x->forward[0]) {
-            x->forward[0]->backward = (x->backward == zsl->header) ?
-                                        NULL : x->backward;
+            x->forward[0]->backward = x->backward;
         } else {
             zsl->tail = x->backward;
         }
@@ -5048,6 +5170,53 @@ static zskiplistNode *zslFirstWithScore(zskiplist *zsl, double score) {
     /* We may have multiple elements with the same score, what we need
      * is to find the element with both the right score and object. */
     return x->forward[0];
+}
+
+/* Find the rank for an element by both score and key.
+ * Returns 0 when the element cannot be found, rank otherwise.
+ * Note that the rank is 1-based due to the span of zsl->header to the
+ * first element. */
+static unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
+    zskiplistNode *x;
+    unsigned long rank = 0;
+    int i;
+
+    x = zsl->header;
+    for (i = zsl->level-1; i >= 0; i--) {
+        while (x->forward[i] &&
+            (x->forward[i]->score < score ||
+                (x->forward[i]->score == score &&
+                compareStringObjects(x->forward[i]->obj,o) <= 0))) {
+            rank += i > 0 ? x->span[i-1] : 1;
+            x = x->forward[i];
+        }
+
+        /* x might be equal to zsl->header, so test if obj is non-NULL */
+        if (x->obj && compareStringObjects(x->obj,o) == 0) {
+            return rank;
+        }
+    }
+    return 0;
+}
+
+/* Finds an element by its rank. The rank argument needs to be 1-based. */
+zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank) {
+    zskiplistNode *x;
+    unsigned long traversed = 0;
+    int i;
+
+    x = zsl->header;
+    for (i = zsl->level-1; i >= 0; i--) {
+        while (x->forward[i] && (traversed + (i > 0 ? x->span[i-1] : 1)) <= rank) {
+            traversed += i > 0 ? x->span[i-1] : 1;
+            x = x->forward[i];
+        }
+
+        if (traversed == rank) {
+            return x;
+        }
+    }
+    return NULL;
 }
 
 /* The actual Z-commands implementations */
@@ -5249,17 +5418,15 @@ static void zrangeGenericCommand(redisClient *c, int reverse) {
             if (end >= llen) end = llen-1;
             rangelen = (end-start)+1;
 
-            /* Return the result in form of a multi-bulk reply */
+            /* check if starting point is trivial, before searching
+             * the element in log(N) time */
             if (reverse) {
-                ln = zsl->tail;
-                while (start--)
-                    ln = ln->backward;
+                ln = start == 0 ? zsl->tail : zslGetElementByRank(zsl, llen - start);
             } else {
-                ln = zsl->header->forward[0];
-                while (start--)
-                    ln = ln->forward[0];
+                ln = start == 0 ? zsl->header->forward[0] : zslGetElementByRank(zsl, start + 1);
             }
 
+            /* Return the result in form of a multi-bulk reply */
             addReplySds(c,sdscatprintf(sdsempty(),"*%d\r\n",
                 withscores ? (rangelen*2) : rangelen));
             for (j = 0; j < rangelen; j++) {
@@ -5449,6 +5616,107 @@ static void zscoreCommand(redisClient *c) {
                 double *score = dictGetEntryVal(de);
 
                 addReplyDouble(c,*score);
+            }
+        }
+    }
+}
+
+static void zrankCommand(redisClient *c) {
+    robj *o;
+    o = lookupKeyRead(c->db,c->argv[1]);
+    if (o == NULL) {
+        addReply(c,shared.nullbulk);
+        return;
+    }
+    if (o->type != REDIS_ZSET) {
+        addReply(c,shared.wrongtypeerr);
+    } else {
+        zset *zs = o->ptr;
+        zskiplist *zsl = zs->zsl;
+        dictEntry *de;
+        unsigned long rank;
+
+        de = dictFind(zs->dict,c->argv[2]);
+        if (!de) {
+            addReply(c,shared.nullbulk);
+            return;
+        }
+
+        double *score = dictGetEntryVal(de);
+        rank = zslGetRank(zsl, *score, c->argv[2]);
+        if (rank) {
+            addReplyLong(c, rank-1);
+        } else {
+            addReply(c,shared.nullbulk);
+        }
+    }
+}
+
+/* ==================================== Hash ================================ */
+static void hsetCommand(redisClient *c) {
+    int update = 0;
+    robj *o = lookupKeyWrite(c->db,c->argv[1]);
+
+    if (o == NULL) {
+        o = createHashObject();
+        dictAdd(c->db->dict,c->argv[1],o);
+        incrRefCount(c->argv[1]);
+    } else {
+        if (o->type != REDIS_HASH) {
+            addReply(c,shared.wrongtypeerr);
+            return;
+        }
+    }
+    if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+        unsigned char *zm = o->ptr;
+
+        zm = zipmapSet(zm,c->argv[2]->ptr,sdslen(c->argv[2]->ptr),
+            c->argv[3]->ptr,sdslen(c->argv[3]->ptr),&update);
+    } else {
+        if (dictAdd(o->ptr,c->argv[2],c->argv[3]) == DICT_OK) {
+            incrRefCount(c->argv[2]);
+        } else {
+            update = 1;
+        }
+        incrRefCount(c->argv[3]);
+    }
+    server.dirty++;
+    addReplySds(c,sdscatprintf(sdsempty(),":%d\r\n",update == 0));
+}
+
+static void hgetCommand(redisClient *c) {
+    robj *o = lookupKeyRead(c->db,c->argv[1]);
+
+    if (o == NULL) {
+        addReply(c,shared.nullbulk);
+        return;
+    } else {
+        if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+            unsigned char *zm = o->ptr;
+            unsigned char *val;
+            unsigned int vlen;
+
+            if (zipmapGet(zm,c->argv[2]->ptr,sdslen(c->argv[2]->ptr), &val,&vlen)) {
+                addReplySds(c,sdscatprintf(sdsempty(),"$%u\r\n", vlen));
+                addReplySds(c,sdsnewlen(val,vlen));
+                addReply(c,shared.crlf);
+                return;
+            } else {
+                addReply(c,shared.nullbulk);
+                return;
+            }
+        } else {
+            struct dictEntry *de;
+
+            de = dictFind(o->ptr,c->argv[2]);
+            if (de == NULL) {
+                addReply(c,shared.nullbulk);
+            } else {
+                robj *e = dictGetEntryVal(de);
+
+                addReplyBulkLen(c,e);
+                addReply(c,e);
+                addReply(c,shared.crlf);
             }
         }
     }

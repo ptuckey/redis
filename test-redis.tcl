@@ -406,15 +406,20 @@ proc main {server port} {
     } {1}
 
     test {Basic LPUSH, RPUSH, LLENGTH, LINDEX} {
-        $r lpush mylist a
-        $r lpush mylist b
-        $r rpush mylist c
-        set res [$r llen mylist]
+        set res [$r lpush mylist a]
+        append res [$r lpush mylist b]
+        append res [$r rpush mylist c]
+        append res [$r llen mylist]
+        append res [$r rpush anotherlist d]
+        append res [$r lpush anotherlist e]
+        append res [$r llen anotherlist]
         append res [$r lindex mylist 0]
         append res [$r lindex mylist 1]
         append res [$r lindex mylist 2]
+        append res [$r lindex anotherlist 0]
+        append res [$r lindex anotherlist 1]
         list $res [$r lindex mylist 100]
-    } {3bac {}}
+    } {1233122baced {}}
 
     test {DEL a list} {
         $r del mylist
@@ -1192,6 +1197,18 @@ proc main {server port} {
         $r zcard ztmp-blabla
     } {0}
 
+    test {ZRANK basics} {
+        $r zadd zranktmp 10 x
+        $r zadd zranktmp 20 y
+        $r zadd zranktmp 30 z
+        list [$r zrank zranktmp x] [$r zrank zranktmp y] [$r zrank zranktmp z]
+    } {0 1 2}
+
+    test {ZRANK - after deletion} {
+        $r zrem zranktmp y
+        list [$r zrank zranktmp x] [$r zrank zranktmp z]
+    } {0 1}
+
     test {ZSCORE} {
         set aux {}
         set err {}
@@ -1515,6 +1532,31 @@ proc main {server port} {
         }
         format $diff
     } {0}
+
+    test {ZSETs ZRANK augmented skip list stress testing} {
+        set err {}
+        $r del myzset
+        for {set k 0} {$k < 10000} {incr k} {
+            set i [expr {$k%1000}]
+            if {[expr rand()] < .2} {
+                $r zrem myzset $i
+            } else {
+                set score [expr rand()]
+                $r zadd myzset $score $i
+            }
+            set card [$r zcard myzset]
+            if {$card > 0} {
+                set index [randomInt $card]
+                set ele [lindex [$r zrange myzset $index $index] 0]
+                set rank [$r zrank myzset $ele]
+                if {$rank != $index} {
+                    set err "$ele RANK is wrong! ($rank != $index)"
+                    break
+                }
+            }
+        }
+        set _ $err
+    } {}
 
     foreach fuzztype {binary alpha compr} {
         test "FUZZ stresser with data model $fuzztype" {
