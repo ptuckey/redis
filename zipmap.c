@@ -363,6 +363,15 @@ int zipmapExists(unsigned char *zm, unsigned char *key, unsigned int klen) {
     return zipmapLookupRaw(zm,key,klen,NULL,NULL,NULL) != NULL;
 }
 
+/* Return the number of entries inside a zipmap */
+unsigned int zipmapLen(unsigned char *zm) {
+    unsigned char *p = zipmapRewind(zm);
+    unsigned int len = 0;
+
+    while((p = zipmapNext(p,NULL,NULL,NULL,NULL)) != NULL) len++;
+    return len;
+}
+
 void zipmapRepr(unsigned char *p) {
     unsigned int l;
 
@@ -405,6 +414,13 @@ int main(void) {
     unsigned char *zm;
 
     zm = zipmapNew();
+
+    zm = zipmapSet(zm,(unsigned char*) "name",4, (unsigned char*) "foo",3,NULL);
+    zm = zipmapSet(zm,(unsigned char*) "surname",7, (unsigned char*) "foo",3,NULL);
+    zm = zipmapSet(zm,(unsigned char*) "age",3, (unsigned char*) "foo",3,NULL);
+    zipmapRepr(zm);
+    exit(1);
+
     zm = zipmapSet(zm,(unsigned char*) "hello",5, (unsigned char*) "world!",6,NULL);
     zm = zipmapSet(zm,(unsigned char*) "foo",3, (unsigned char*) "bar",3,NULL);
     zm = zipmapSet(zm,(unsigned char*) "foo",3, (unsigned char*) "!",1,NULL);
