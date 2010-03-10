@@ -1204,6 +1204,10 @@ proc main {server port} {
         list [$r zrank zranktmp x] [$r zrank zranktmp y] [$r zrank zranktmp z]
     } {0 1 2}
 
+    test {ZREVRANK basics} {
+        list [$r zrevrank zranktmp x] [$r zrevrank zranktmp y] [$r zrevrank zranktmp z]
+    } {2 1 0}
+
     test {ZRANK - after deletion} {
         $r zrem zranktmp y
         list [$r zrank zranktmp x] [$r zrank zranktmp z]
@@ -1442,7 +1446,7 @@ proc main {server port} {
         $r zrangebyscore zset 20 50 LIMIT 2 3 withscores
     } {d 40 e 50}
 
-    test {ZREMRANGE basics} {
+    test {ZREMRANGEBYSCORE basics} {
         $r del zset
         $r zadd zset 1 a
         $r zadd zset 2 b
@@ -1452,7 +1456,7 @@ proc main {server port} {
         list [$r zremrangebyscore zset 2 4] [$r zrange zset 0 -1]
     } {3 {a e}}
 
-    test {ZREMRANGE from -inf to +inf} {
+    test {ZREMRANGEBYSCORE from -inf to +inf} {
         $r del zset
         $r zadd zset 1 a
         $r zadd zset 2 b
@@ -1461,6 +1465,39 @@ proc main {server port} {
         $r zadd zset 5 e
         list [$r zremrangebyscore zset -inf +inf] [$r zrange zset 0 -1]
     } {5 {}}
+
+    test {ZREMRANGEBYRANK basics} {
+        $r del zset
+        $r zadd zset 1 a
+        $r zadd zset 2 b
+        $r zadd zset 3 c
+        $r zadd zset 4 d
+        $r zadd zset 5 e
+        list [$r zremrangebyrank zset 1 3] [$r zrange zset 0 -1]
+    } {3 {a e}}
+
+    test {ZUNION basics} {
+        $r del zseta zsetb zsetc
+        $r zadd zseta 1 a
+        $r zadd zseta 2 b
+        $r zadd zseta 3 c
+        $r zadd zsetb 1 b
+        $r zadd zsetb 2 c
+        $r zadd zsetb 3 d
+        list [$r zunion zsetc 2 zseta zsetb] [$r zrange zsetc 0 -1 withscores]
+    } {4 {a 1 b 3 d 3 c 5}}
+
+    test {ZUNION with weights} {
+        list [$r zunion zsetc 2 zseta zsetb weights 2 3] [$r zrange zsetc 0 -1 withscores]
+    } {4 {a 2 b 7 d 9 c 12}}
+
+    test {ZINTER basics} {
+        list [$r zinter zsetc 2 zseta zsetb] [$r zrange zsetc 0 -1 withscores]
+    } {2 {b 3 c 5}}
+
+    test {ZINTER with weights} {
+        list [$r zinter zsetc 2 zseta zsetb weights 2 3] [$r zrange zsetc 0 -1 withscores]
+    } {2 {b 7 c 12}}
 
     test {SORT against sorted sets} {
         $r del zset
