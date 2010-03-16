@@ -105,6 +105,7 @@ static struct redisCommand cmdTable[] = {
     {"zmergeweighed",-4,REDIS_CMD_INLINE},
     {"zrange",-4,REDIS_CMD_INLINE},
     {"zrank",3,REDIS_CMD_BULK},
+    {"zrevrank",3,REDIS_CMD_BULK},
     {"zrangebyscore",-4,REDIS_CMD_INLINE},
     {"zcount",4,REDIS_CMD_INLINE},
     {"zrevrange",-4,REDIS_CMD_INLINE},
@@ -147,6 +148,11 @@ static struct redisCommand cmdTable[] = {
     {"discard",1,REDIS_CMD_INLINE},
     {"hset",4,REDIS_CMD_MULTIBULK},
     {"hget",3,REDIS_CMD_BULK},
+    {"hdel",3,REDIS_CMD_BULK},
+    {"hlen",2,REDIS_CMD_INLINE},
+    {"hkeys",2,REDIS_CMD_INLINE},
+    {"hvals",2,REDIS_CMD_INLINE},
+    {"hgetall",2,REDIS_CMD_INLINE},
     {NULL,0,0}
 };
 
