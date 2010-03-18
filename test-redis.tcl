@@ -125,6 +125,7 @@ proc randomKey {} {
 proc createComplexDataset {r ops} {
     for {set j 0} {$j < $ops} {incr j} {
         set k [randomKey]
+        set f [randomValue]
         set v [randomValue]
         randpath {
             set d [expr {rand()}]
@@ -150,6 +151,8 @@ proc createComplexDataset {r ops} {
                 $r sadd $k $v
             } {
                 $r zadd $k $d $v
+            } {
+                $r hset $k $f $v
             }
             set t [$r type $k]
         }
@@ -172,6 +175,10 @@ proc createComplexDataset {r ops} {
             {zset} {
                 randpath {$r zadd $k $d $v} \
                         {$r zrem $k $v}
+            }
+            {hash} {
+                randpath {$r hset $k $f $v} \
+                        {$r hdel $k $f}
             }
         }
     }
@@ -202,6 +209,12 @@ proc datasetDigest r {
                     set aux {}
                 } else {
                     set aux [::sha1::sha1 -hex [$r zrange $k 0 -1]]
+                }
+            } {hash} {
+                if {[$r hlen $k] == 0} {
+                    set aux {}
+                } else {
+                    set aux [::sha1::sha1 -hex [lsort [$r hgetall $k]]]
                 }
             } default {
                 error "Type not supported: $t"
@@ -1491,6 +1504,14 @@ proc main {server port} {
         list [$r zunion zsetc 2 zseta zsetb weights 2 3] [$r zrange zsetc 0 -1 withscores]
     } {4 {a 2 b 7 d 9 c 12}}
 
+    test {ZUNION with AGGREGATE MIN} {
+        list [$r zunion zsetc 2 zseta zsetb aggregate min] [$r zrange zsetc 0 -1 withscores]
+    } {4 {a 1 b 1 c 2 d 3}}
+
+    test {ZUNION with AGGREGATE MAX} {
+        list [$r zunion zsetc 2 zseta zsetb aggregate max] [$r zrange zsetc 0 -1 withscores]
+    } {4 {a 1 b 2 c 3 d 3}}
+
     test {ZINTER basics} {
         list [$r zinter zsetc 2 zseta zsetb] [$r zrange zsetc 0 -1 withscores]
     } {2 {b 3 c 5}}
@@ -1498,6 +1519,14 @@ proc main {server port} {
     test {ZINTER with weights} {
         list [$r zinter zsetc 2 zseta zsetb weights 2 3] [$r zrange zsetc 0 -1 withscores]
     } {2 {b 7 c 12}}
+
+    test {ZINTER with AGGREGATE MIN} {
+        list [$r zinter zsetc 2 zseta zsetb aggregate min] [$r zrange zsetc 0 -1 withscores]
+    } {2 {b 1 c 2}}
+
+    test {ZINTER with AGGREGATE MAX} {
+        list [$r zinter zsetc 2 zseta zsetb aggregate max] [$r zrange zsetc 0 -1 withscores]
+    } {2 {b 2 c 3}}
 
     test {SORT against sorted sets} {
         $r del zset
@@ -1584,10 +1613,12 @@ proc main {server port} {
         set rv {}
         set k [lindex [array names smallhash *] 0]
         lappend rv [$r hset smallhash $k newval1]
+        set smallhash($k) newval1
         lappend rv [$r hget smallhash $k]
         lappend rv [$r hset smallhash __foobar123__ newval]
         set k [lindex [array names bighash *] 0]
         lappend rv [$r hset bighash $k newval2]
+        set bighash($k) newval2
         lappend rv [$r hget bighash $k]
         lappend rv [$r hset bighash __foobar123__ newval]
         lappend rv [$r hdel smallhash __foobar123__]
@@ -1610,12 +1641,63 @@ proc main {server port} {
         lsort [$r hkeys bighash]
     } [lsort [array names bighash *]]
 
+    test {HVALS - small hash} {
+        set vals {}
+        foreach {k v} [array get smallhash] {
+            lappend vals $v
+        }
+        set _ [lsort $vals]
+    } [lsort [$r hvals smallhash]]
+
+    test {HVALS - big hash} {
+        set vals {}
+        foreach {k v} [array get bighash] {
+            lappend vals $v
+        }
+        set _ [lsort $vals]
+    } [lsort [$r hvals bighash]]
+
+    test {HGETALL - small hash} {
+        lsort [$r hgetall smallhash]
+    } [lsort [array get smallhash]]
+
+    test {HGETALL - big hash} {
+        lsort [$r hgetall bighash]
+    } [lsort [array get bighash]]
+
+    test {HDEL and return value} {
+        set rv {}
+        lappend rv [$r hdel smallhash nokey]
+        lappend rv [$r hdel bighash nokey]
+        set k [lindex [array names smallhash *] 0]
+        lappend rv [$r hdel smallhash $k]
+        lappend rv [$r hdel smallhash $k]
+        lappend rv [$r hget smallhash $k]
+        unset smallhash($k)
+        set k [lindex [array names bighash *] 0]
+        lappend rv [$r hdel bighash $k]
+        lappend rv [$r hdel bighash $k]
+        lappend rv [$r hget bighash $k]
+        unset bighash($k)
+        set _ $rv
+    } {0 0 1 0 {} 1 0 {}}
+
+    test {HEXISTS} {
+        set rv {}
+        set k [lindex [array names smallhash *] 0]
+        lappend rv [$r hexists smallhash $k]
+        lappend rv [$r hexists smallhash nokey]
+        set k [lindex [array names bighash *] 0]
+        lappend rv [$r hexists bighash $k]
+        lappend rv [$r hexists bighash nokey]
+    } {1 0 1 0}
+
+    test {Is a zipmap encoded Hash promoted on big payload?} {
+        $r hset smallhash foo [string repeat a 1024]
+        $r debug object smallhash
+    } {*hashtable*}
+
     # TODO:
-    # Propoted to hash table on big payload?
-    # HVALS
-    # HGETALL
-    # HDEL
-    # HDEL return value
     # Randomized test, small and big
     # .rdb / AOF consistency test should include hashes
 

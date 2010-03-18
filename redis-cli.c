@@ -52,6 +52,7 @@ static struct config {
     long repeat;
     int dbnum;
     int interactive;
+    char *auth;
 } config;
 
 struct redisCommand {
@@ -61,6 +62,7 @@ struct redisCommand {
 };
 
 static struct redisCommand cmdTable[] = {
+    {"auth",2,REDIS_CMD_INLINE},
     {"get",2,REDIS_CMD_INLINE},
     {"set",3,REDIS_CMD_BULK},
     {"setnx",3,REDIS_CMD_BULK},
@@ -153,6 +155,7 @@ static struct redisCommand cmdTable[] = {
     {"hkeys",2,REDIS_CMD_INLINE},
     {"hvals",2,REDIS_CMD_INLINE},
     {"hgetall",2,REDIS_CMD_INLINE},
+    {"hexists",3,REDIS_CMD_BULK},
     {NULL,0,0}
 };
 
@@ -397,6 +400,9 @@ static int parseOptions(int argc, char **argv) {
         } else if (!strcmp(argv[i],"-n") && !lastarg) {
             config.dbnum = atoi(argv[i+1]);
             i++;
+        } else if (!strcmp(argv[i],"-a") && !lastarg) {
+            config.auth = argv[i+1];
+            i++;
         } else if (!strcmp(argv[i],"-i")) {
             config.interactive = 1;
         } else {
@@ -424,8 +430,8 @@ static sds readArgFromStdin(void) {
 }
 
 static void usage() {
-    fprintf(stderr, "usage: redis-cli [-h host] [-p port] [-r repeat_times] [-n db_num] [-i] cmd arg1 arg2 arg3 ... argN\n");
-    fprintf(stderr, "usage: echo \"argN\" | redis-cli [-h host] [-p port] [-r repeat_times] [-n db_num] cmd arg1 arg2 ... arg(N-1)\n");
+    fprintf(stderr, "usage: redis-cli [-h host] [-p port] [-a authpw] [-r repeat_times] [-n db_num] [-i] cmd arg1 arg2 arg3 ... argN\n");
+    fprintf(stderr, "usage: echo \"argN\" | redis-cli [-h host] [-a authpw] [-p port] [-r repeat_times] [-n db_num] cmd arg1 arg2 ... arg(N-1)\n");
     fprintf(stderr, "\nIf a pipe from standard input is detected this data is used as last argument.\n\n");
     fprintf(stderr, "example: cat /etc/passwd | redis-cli set my_passwd\n");
     fprintf(stderr, "example: redis-cli get my_passwd\n");
@@ -463,6 +469,14 @@ static void repl() {
     char *line = buffer;
     char **ap, *args[max];
 
+    if (config.auth != NULL) {
+        char *authargv[2];
+
+        authargv[0] = "AUTH";
+        authargv[1] = config.auth;
+        cliSendCommand(2, convertToSds(2, authargv));
+    }
+
     while (prompt(line, size)) {
         argc = 0;
 
@@ -494,6 +508,7 @@ int main(int argc, char **argv) {
     config.repeat = 1;
     config.dbnum = 0;
     config.interactive = 0;
+    config.auth = NULL;
 
     firstarg = parseOptions(argc,argv);
     argc -= firstarg;
