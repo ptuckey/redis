@@ -1,3 +1,9 @@
+redis (2:1.3.6-rdio.1) unstable; urgency=low
+
+  * New upstream version.
+
+ -- Manish Singh <manish@rd.io>  Fri, 19 Mar 2010 16:55:17 -0700
+
 redis (2:1.3.4-rdio.2) unstable; urgency=low
 
   * Added syslog support
