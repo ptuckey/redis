@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.7"
+#define REDIS_VERSION "1.3.8"
 
 #include "fmacros.h"
 #include "config.h"
@@ -87,12 +87,12 @@
 #define REDIS_MAXIDLETIME       (60*5)  /* default client timeout */
 #define REDIS_IOBUF_LEN         1024
 #define REDIS_LOADBUF_LEN       1024
-#define REDIS_STATIC_ARGS       4
+#define REDIS_STATIC_ARGS       8
 #define REDIS_DEFAULT_DBNUM     16
 #define REDIS_CONFIGLINE_MAX    1024
 #define REDIS_OBJFREELIST_MAX   1000000 /* Max number of objects to cache */
 #define REDIS_MAX_SYNC_TIME     60      /* Slave can't take more to sync */
-#define REDIS_EXPIRELOOKUPS_PER_CRON    100 /* try to expire 100 keys/second */
+#define REDIS_EXPIRELOOKUPS_PER_CRON    10 /* try to expire 10 keys/loop */
 #define REDIS_MAX_WRITE_PER_EVENT (1024*64)
 #define REDIS_REQUEST_MAX_SIZE (1024*1024*256) /* max bytes in inline command */
 
@@ -370,6 +370,7 @@ typedef struct redisClient {
                              * is >= blockingto then the operation timed out. */
     list *io_keys;          /* Keys this client is waiting to be loaded from the
                              * swap file in order to continue. */
+    dict *pubsub_classes;   /* Classes a client is interested in (SUBSCRIBE) */
 } redisClient;
 
 struct saveparam {
@@ -396,6 +397,7 @@ struct redisServer {
     time_t stat_starttime;         /* server start time */
     long long stat_numcommands;    /* number of processed commands */
     long long stat_numconnections; /* number of connections received */
+    long long stat_expiredkeys;   /* number of expired keys */
     /* Configuration */
     int verbosity;
     int glueoutputbuf;
@@ -479,6 +481,9 @@ struct redisServer {
     unsigned long long vm_stats_swapped_objects;
     unsigned long long vm_stats_swapouts;
     unsigned long long vm_stats_swapins;
+    /* Pubsub */
+    dict *pubsub_classes; /* Associate classes to list of subscribed clients */
+    /* Misc */
     FILE *devnull;
 };
 
@@ -545,7 +550,8 @@ struct sharedObjectsStruct {
     *emptymultibulk, *wrongtypeerr, *nokeyerr, *syntaxerr, *sameobjecterr,
     *outofrangeerr, *plus,
     *select0, *select1, *select2, *select3, *select4,
-    *select5, *select6, *select7, *select8, *select9;
+    *select5, *select6, *select7, *select8, *select9,
+    *messagebulk, *subscribebulk, *unsubscribebulk, *mbulk3;
 } shared;
 
 /* Global vars that are actally used as constants. The following double
@@ -565,7 +571,7 @@ typedef struct iojob {
     robj *val;  /* the value to swap for REDIS_IOREQ_*_SWAP, otherwise this
                  * field is populated by the I/O thread for REDIS_IOREQ_LOAD. */
     off_t page; /* Swap page where to read/write the object */
-    off_t pages; /* Swap pages needed to safe object. PREPARE_SWAP return val */
+    off_t pages; /* Swap pages needed to save object. PREPARE_SWAP return val */
     int canceled; /* True if this command was canceled by blocking side of VM */
     pthread_t thread; /* ID of the thread processing this entry */
 } iojob;
@@ -585,7 +591,7 @@ static void incrRefCount(robj *o);
 static int rdbSaveBackground(char *filename);
 static robj *createStringObject(char *ptr, size_t len);
 static robj *dupStringObject(robj *o);
-static void replicationFeedSlaves(list *slaves, struct redisCommand *cmd, int dictid, robj **argv, int argc);
+static void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc);
 static int syncWithMaster(void);
 static robj *tryObjectSharing(robj *o);
@@ -645,6 +651,8 @@ static struct redisCommand *lookupCommand(char *name);
 static void call(redisClient *c, struct redisCommand *cmd);
 static void resetClient(redisClient *c);
 static void convertToRealHash(robj *o);
+static int pubsubUnsubscribeAll(redisClient *c, int notify);
+static void usage();
 
 static void authCommand(redisClient *c);
 static void pingCommand(redisClient *c);
@@ -740,6 +748,11 @@ static void hkeysCommand(redisClient *c);
 static void hvalsCommand(redisClient *c);
 static void hgetallCommand(redisClient *c);
 static void hexistsCommand(redisClient *c);
+static void configCommand(redisClient *c);
+static void hincrbyCommand(redisClient *c);
+static void subscribeCommand(redisClient *c);
+static void unsubscribeCommand(redisClient *c);
+static void publishCommand(redisClient *c);
 
 /*================================= Globals ================================= */
 
@@ -799,6 +812,7 @@ static struct redisCommand cmdTable[] = {
     {"zrank",zrankCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"zrevrank",zrevrankCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hset",hsetCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"hincrby",hincrbyCommand,4,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"hget",hgetCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hdel",hdelCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hlen",hlenCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
@@ -830,7 +844,7 @@ static struct redisCommand cmdTable[] = {
     {"lastsave",lastsaveCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
     {"type",typeCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"multi",multiCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
-    {"exec",execCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
+    {"exec",execCommand,1,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,0,0,0},
     {"discard",discardCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
     {"sync",syncCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
     {"flushdb",flushdbCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
@@ -841,15 +855,17 @@ static struct redisCommand cmdTable[] = {
     {"ttl",ttlCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"slaveof",slaveofCommand,3,REDIS_CMD_INLINE,NULL,0,0,0},
     {"debug",debugCommand,-2,REDIS_CMD_INLINE,NULL,0,0,0},
+    {"config",configCommand,-2,REDIS_CMD_BULK,NULL,0,0,0},
+    {"subscribe",subscribeCommand,-2,REDIS_CMD_INLINE,NULL,0,0,0},
+    {"unsubscribe",unsubscribeCommand,-1,REDIS_CMD_INLINE,NULL,0,0,0},
+    {"publish",publishCommand,3,REDIS_CMD_BULK,NULL,0,0,0},
     {NULL,NULL,0,0,NULL,0,0,0}
 };
-
-static void usage();
 
 /*============================ Utility functions ============================ */
 
 /* Glob-style pattern matching. */
-int stringmatchlen(const char *pattern, int patternLen,
+static int stringmatchlen(const char *pattern, int patternLen,
         const char *string, int stringLen, int nocase)
 {
     while(patternLen) {
@@ -969,6 +985,10 @@ int stringmatchlen(const char *pattern, int patternLen,
     if (patternLen == 0 && stringLen == 0)
         return 1;
     return 0;
+}
+
+static int stringmatch(const char *pattern, const char *string, int nocase) {
+    return stringmatchlen(pattern,strlen(pattern),string,strlen(string),nocase);
 }
 
 static void redisLog(int level, const char *fmt, ...) {
@@ -1184,7 +1204,8 @@ static void closeTimedoutClients(void) {
         if (server.maxidletime &&
             !(c->flags & REDIS_SLAVE) &&    /* no timeout for slaves */
             !(c->flags & REDIS_MASTER) &&   /* no timeout for masters */
-             (now - c->lastinteraction > server.maxidletime))
+            dictSize(c->pubsub_classes) == 0 && /* no timeout for pubsub */
+            (now - c->lastinteraction > server.maxidletime))
         {
             redisLog(REDIS_VERBOSE,"Closing idle client");
             freeClient(c);
@@ -1325,7 +1346,7 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
         size = dictSlots(server.db[j].dict);
         used = dictSize(server.db[j].dict);
         vkeys = dictSize(server.db[j].expires);
-        if (!(loops % 5) && (used || vkeys)) {
+        if (!(loops % 50) && (used || vkeys)) {
             redisLog(REDIS_VERBOSE,"DB %d: %lld keys (%lld volatile) in %lld slots HT.",j,used,vkeys,size);
             /* dictPrintStats(server.dict); */
         }
@@ -1337,10 +1358,10 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
      * if we resize the HT while there is the saving child at work actually
      * a lot of memory movements in the parent will cause a lot of pages
      * copied. */
-    if (server.bgsavechildpid == -1) tryResizeHashTables();
+    if (server.bgsavechildpid == -1 && !(loops % 10)) tryResizeHashTables();
 
     /* Show information about connected clients */
-    if (!(loops % 5)) {
+    if (!(loops % 50)) {
         redisLog(REDIS_VERBOSE,"%d clients connected (%d slaves), %zu bytes in use, %d shared objects",
             listLength(server.clients)-listLength(server.slaves),
             listLength(server.slaves),
@@ -1349,7 +1370,7 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
     }
 
     /* Close connections of timedout clients */
-    if ((server.maxidletime && !(loops % 10)) || server.blpop_blocked_clients)
+    if ((server.maxidletime && !(loops % 100)) || server.blpop_blocked_clients)
         closeTimedoutClients();
 
     /* Check if a background saving or AOF rewrite in progress terminated */
@@ -1407,6 +1428,7 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
                 if (now > t) {
                     deleteKey(db,dictGetEntryKey(de));
                     expired++;
+                    server.stat_expiredkeys++;
                 }
             }
         } while (expired > REDIS_EXPIRELOOKUPS_PER_CRON/4);
@@ -1424,7 +1446,7 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
             retval = (server.vm_max_threads == 0) ?
                         vmSwapOneObjectBlocking() :
                         vmSwapOneObjectThreaded();
-            if (retval == REDIS_ERR && (loops % 30) == 0 &&
+            if (retval == REDIS_ERR && !(loops % 300) &&
                 zmalloc_used_memory() >
                 (server.vm_max_memory+server.vm_max_memory/10))
             {
@@ -1439,13 +1461,13 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
     }
 
     /* Check if we should connect to a MASTER */
-    if (server.replstate == REDIS_REPL_CONNECT) {
+    if (server.replstate == REDIS_REPL_CONNECT && !(loops % 10)) {
         redisLog(REDIS_NOTICE,"Connecting to MASTER...");
         if (syncWithMaster() == REDIS_OK) {
             redisLog(REDIS_NOTICE,"MASTER <-> SLAVE sync succeeded");
         }
     }
-    return 1000;
+    return 100;
 }
 
 /* This function gets called every time Redis is entering the
@@ -1515,6 +1537,10 @@ static void createSharedObjects(void) {
     shared.select7 = createStringObject("select 7\r\n",10);
     shared.select8 = createStringObject("select 8\r\n",10);
     shared.select9 = createStringObject("select 9\r\n",10);
+    shared.messagebulk = createStringObject("$7\r\nmessage\r\n",13);
+    shared.subscribebulk = createStringObject("$9\r\nsubscribe\r\n",15);
+    shared.unsubscribebulk = createStringObject("$11\r\nunsubscribe\r\n",18);
+    shared.mbulk3 = createStringObject("*3\r\n",4);
 }
 
 static void appendServerSaveParams(time_t seconds, int changes) {
@@ -1547,9 +1573,9 @@ static void initServerConfig() {
     server.lastfsync = time(NULL);
     server.appendfd = -1;
     server.appendseldb = -1; /* Make sure the first time will not match */
-    server.pidfile = "/var/run/redis.pid";
-    server.dbfilename = "dump.rdb";
-    server.appendfilename = "appendonly.aof";
+    server.pidfile = zstrdup("/var/run/redis.pid");
+    server.dbfilename = zstrdup("dump.rdb");
+    server.appendfilename = zstrdup("appendonly.aof");
     server.requirepass = NULL;
     server.shareobjects = 0;
     server.rdbcompression = 1;
@@ -1622,6 +1648,7 @@ static void initServer() {
             server.db[j].io_keys = dictCreate(&keylistDictType,NULL);
         server.db[j].id = j;
     }
+    server.pubsub_classes = dictCreate(&keylistDictType,NULL);
     server.cronloops = 0;
     server.bgsavechildpid = -1;
     server.bgrewritechildpid = -1;
@@ -1630,6 +1657,7 @@ static void initServer() {
     server.dirty = 0;
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
+    server.stat_expiredkeys = 0;
     server.stat_starttime = time(NULL);
     server.unixtime = time(NULL);
     aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL);
@@ -1834,8 +1862,10 @@ static void loadServerConfig(char *filename) {
         } else if (!strcasecmp(argv[0],"requirepass") && argc == 2) {
             server.requirepass = zstrdup(argv[1]);
         } else if (!strcasecmp(argv[0],"pidfile") && argc == 2) {
+            zfree(server.pidfile);
             server.pidfile = zstrdup(argv[1]);
         } else if (!strcasecmp(argv[0],"dbfilename") && argc == 2) {
+            zfree(server.dbfilename);
             server.dbfilename = zstrdup(argv[1]);
         } else if (!strcasecmp(argv[0],"vm-enabled") && argc == 2) {
             if ((server.vm_enabled = yesnotoi(argv[1])) == -1) {
@@ -1901,6 +1931,10 @@ static void freeClient(redisClient *c) {
     if (c->flags & REDIS_BLOCKED)
         unblockClientWaitingData(c);
 
+    /* Unsubscribe from all the pubsub classes */
+    pubsubUnsubscribeAll(c,0);
+    dictRelease(c->pubsub_classes);
+    /* Obvious cleanup */
     aeDeleteFileEvent(server.el,c->fd,AE_READABLE);
     aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
     listRelease(c->reply);
@@ -1923,7 +1957,7 @@ static void freeClient(redisClient *c) {
         dontWaitForSwappedKey(c,ln->value);
     }
     listRelease(c->io_keys);
-    /* Other cleanup */
+    /* Master/slave cleanup */
     if (c->flags & REDIS_SLAVE) {
         if (c->replstate == REDIS_REPL_SEND_BULK && c->repldbfd != -1)
             close(c->repldbfd);
@@ -1936,6 +1970,7 @@ static void freeClient(redisClient *c) {
         server.master = NULL;
         server.replstate = REDIS_REPL_CONNECT;
     }
+    /* Release memory */
     zfree(c->argv);
     zfree(c->mbargv);
     freeClientMultiState(c);
@@ -2139,9 +2174,9 @@ static void call(redisClient *c, struct redisCommand *cmd) {
     if (server.appendonly && server.dirty-dirty)
         feedAppendOnlyFile(cmd,c->db->id,c->argv,c->argc);
     if (server.dirty-dirty && listLength(server.slaves))
-        replicationFeedSlaves(server.slaves,cmd,c->db->id,c->argv,c->argc);
+        replicationFeedSlaves(server.slaves,c->db->id,c->argv,c->argc);
     if (listLength(server.monitors))
-        replicationFeedSlaves(server.monitors,cmd,c->db->id,c->argv,c->argc);
+        replicationFeedSlaves(server.monitors,c->db->id,c->argv,c->argc);
     server.stat_numcommands++;
 }
 
@@ -2251,10 +2286,6 @@ static int processCommand(redisClient *c) {
                 cmd->name));
         resetClient(c);
         return 1;
-    } else if (server.maxmemory && cmd->flags & REDIS_CMD_DENYOOM && zmalloc_used_memory() > server.maxmemory) {
-        addReplySds(c,sdsnew("-ERR command not allowed when used memory > 'maxmemory'\r\n"));
-        resetClient(c);
-        return 1;
     } else if (cmd->flags & REDIS_CMD_BULK && c->bulklen == -1) {
         /* This is a bulk command, we have to read the last argument yet. */
         int bulklen = atoi(c->argv[c->argc-1]->ptr);
@@ -2300,6 +2331,23 @@ static int processCommand(redisClient *c) {
         return 1;
     }
 
+    /* Handle the maxmemory directive */
+    if (server.maxmemory && (cmd->flags & REDIS_CMD_DENYOOM) &&
+        zmalloc_used_memory() > server.maxmemory)
+    {
+        addReplySds(c,sdsnew("-ERR command not allowed when used memory > 'maxmemory'\r\n"));
+        resetClient(c);
+        return 1;
+    }
+
+    /* Only allow SUBSCRIBE and UNSUBSCRIBE in the context of Pub/Sub */
+    if (dictSize(c->pubsub_classes) > 0 &&
+        cmd->proc != subscribeCommand && cmd->proc != unsubscribeCommand) {
+        addReplySds(c,sdsnew("-ERR only SUBSCRIBE / UNSUBSCRIBE / QUIT allowed in this context\r\n"));
+        resetClient(c);
+        return 1;
+    }
+
     /* Exec the command */
     if (c->flags & REDIS_MULTI && cmd->proc != execCommand && cmd->proc != discardCommand) {
         queueMultiCommand(c,cmd);
@@ -2315,34 +2363,36 @@ static int processCommand(redisClient *c) {
     return 1;
 }
 
-static void replicationFeedSlaves(list *slaves, struct redisCommand *cmd, int dictid, robj **argv, int argc) {
+static void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     listNode *ln;
     listIter li;
     int outc = 0, j;
     robj **outv;
-    /* (args*2)+1 is enough room for args, spaces, newlines */
-    robj *static_outv[REDIS_STATIC_ARGS*2+1];
+    /* We need 1+(ARGS*3) objects since commands are using the new protocol
+     * and we one 1 object for the first "*<count>\r\n" multibulk count, then
+     * for every additional object we have "$<count>\r\n" + object + "\r\n". */
+    robj *static_outv[REDIS_STATIC_ARGS*3+1];
+    robj *lenobj;
 
     if (argc <= REDIS_STATIC_ARGS) {
         outv = static_outv;
     } else {
-        outv = zmalloc(sizeof(robj*)*(argc*2+1));
+        outv = zmalloc(sizeof(robj*)*(argc*3+1));
     }
-    
-    for (j = 0; j < argc; j++) {
-        if (j != 0) outv[outc++] = shared.space;
-        if ((cmd->flags & REDIS_CMD_BULK) && j == argc-1) {
-            robj *lenobj;
 
-            lenobj = createObject(REDIS_STRING,
-                sdscatprintf(sdsempty(),"%lu\r\n",
-                    (unsigned long) stringObjectLen(argv[j])));
-            lenobj->refcount = 0;
-            outv[outc++] = lenobj;
-        }
+    lenobj = createObject(REDIS_STRING,
+            sdscatprintf(sdsempty(), "*%d\r\n", argc));
+    lenobj->refcount = 0;
+    outv[outc++] = lenobj;
+    for (j = 0; j < argc; j++) {
+        lenobj = createObject(REDIS_STRING,
+            sdscatprintf(sdsempty(),"$%lu\r\n",
+                (unsigned long) stringObjectLen(argv[j])));
+        lenobj->refcount = 0;
+        outv[outc++] = lenobj;
         outv[outc++] = argv[j];
+        outv[outc++] = shared.crlf;
     }
-    outv[outc++] = shared.crlf;
 
     /* Increment all the refcounts at start and decrement at end in order to
      * be sure to free objects if there is no slave in a replication state
@@ -2494,8 +2544,7 @@ static void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mas
     } else {
         return;
     }
-    if (!(c->flags & REDIS_BLOCKED))
-        processInputBuffer(c);
+    processInputBuffer(c);
 }
 
 static int selectDb(redisClient *c, int id) {
@@ -2536,6 +2585,7 @@ static redisClient *createClient(int fd) {
     c->blockingkeys = NULL;
     c->blockingkeysnum = 0;
     c->io_keys = listCreate();
+    c->pubsub_classes = dictCreate(&setDictType,NULL);
     listSetFreeMethod(c->io_keys,decrRefCount);
     if (aeCreateFileEvent(server.el, c->fd, AE_READABLE,
         readQueryFromClient, c) == AE_ERR) {
@@ -2630,6 +2680,17 @@ static void addReplyBulk(redisClient *c, robj *obj) {
     addReplyBulkLen(c,obj);
     addReply(c,obj);
     addReply(c,shared.crlf);
+}
+
+/* In the CONFIG command we need to add vanilla C string as bulk replies */
+static void addReplyBulkCString(redisClient *c, char *s) {
+    if (s == NULL) {
+        addReply(c,shared.nullbulk);
+    } else {
+        robj *o = createStringObject(s,strlen(s));
+        addReplyBulk(c,o);
+        decrRefCount(o);
+    }
 }
 
 static void acceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
@@ -4448,6 +4509,7 @@ static void popGenericCommand(redisClient *c, int where) {
         robj *ele = listNodeValue(ln);
         addReplyBulk(c,ele);
         listDelNode(list,ln);
+        if (listLength(list) == 0) deleteKey(c->db,c->argv[1]);
         server.dirty++;
     }
 }
@@ -4540,6 +4602,7 @@ static void ltrimCommand(redisClient *c) {
         ln = listLast(list);
         listDelNode(list,ln);
     }
+    if (listLength(list) == 0) deleteKey(c->db,c->argv[1]);
     server.dirty++;
     addReply(c,shared.ok);
 }
@@ -4573,6 +4636,7 @@ static void lremCommand(redisClient *c) {
         }
         ln = next;
     }
+    if (listLength(list) == 0) deleteKey(c->db,c->argv[1]);
     addReplySds(c,sdscatprintf(sdsempty(),":%d\r\n",removed));
 }
 
@@ -4632,6 +4696,7 @@ static void rpoplpushcommand(redisClient *c) {
 
         /* Finally remove the element from the source list */
         listDelNode(srclist,ln);
+        if (listLength(srclist) == 0) deleteKey(c->db,c->argv[1]);
         server.dirty++;
     }
 }
@@ -4670,6 +4735,7 @@ static void sremCommand(redisClient *c) {
     if (dictDelete(set->ptr,c->argv[2]) == DICT_OK) {
         server.dirty++;
         if (htNeedsResize(set->ptr)) dictResize(set->ptr);
+        if (dictSize((dict*)set->ptr) == 0) deleteKey(c->db,c->argv[1]);
         addReply(c,shared.cone);
     } else {
         addReply(c,shared.czero);
@@ -4699,6 +4765,8 @@ static void smoveCommand(redisClient *c) {
         addReply(c,shared.czero);
         return;
     }
+    if (dictSize((dict*)srcset->ptr) == 0 && srcset != dstset)
+        deleteKey(c->db,c->argv[1]);
     server.dirty++;
     /* Add the element to the destination set */
     if (!dstset) {
@@ -4750,6 +4818,7 @@ static void spopCommand(redisClient *c) {
         addReplyBulk(c,ele);
         dictDelete(set->ptr,ele);
         if (htNeedsResize(set->ptr)) dictResize(set->ptr);
+        if (dictSize((dict*)set->ptr) == 0) deleteKey(c->db,c->argv[1]);
         server.dirty++;
     }
 }
@@ -4851,18 +4920,20 @@ static void sinterGenericCommand(redisClient *c, robj **setskeys, unsigned long 
     dictReleaseIterator(di);
 
     if (dstkey) {
-        /* Store the resulting set into the target */
+        /* Store the resulting set into the target, if the intersection
+         * is not an empty set. */
         deleteKey(c->db,dstkey);
-        dictAdd(c->db->dict,dstkey,dstset);
-        incrRefCount(dstkey);
-    }
-
-    if (!dstkey) {
-        lenobj->ptr = sdscatprintf(sdsempty(),"*%lu\r\n",cardinality);
-    } else {
-        addReplySds(c,sdscatprintf(sdsempty(),":%lu\r\n",
-            dictSize((dict*)dstset->ptr)));
+        if (dictSize((dict*)dstset->ptr) > 0) {
+            dictAdd(c->db->dict,dstkey,dstset);
+            incrRefCount(dstkey);
+            addReplyLong(c,dictSize((dict*)dstset->ptr));
+        } else {
+            decrRefCount(dstset);
+            addReply(c,shared.czero);
+        }
         server.dirty++;
+    } else {
+        lenobj->ptr = sdscatprintf(sdsempty(),"*%lu\r\n",cardinality);
     }
     zfree(dv);
 }
@@ -4935,7 +5006,8 @@ static void sunionDiffGenericCommand(redisClient *c, robj **setskeys, int setsnu
         }
         dictReleaseIterator(di);
 
-        if (op == REDIS_OP_DIFF && cardinality == 0) break; /* result set is empty */
+        /* result set is empty? Exit asap. */
+        if (op == REDIS_OP_DIFF && cardinality == 0) break;
     }
 
     /* Output the content of the resulting set, if not in STORE mode */
@@ -4949,20 +5021,19 @@ static void sunionDiffGenericCommand(redisClient *c, robj **setskeys, int setsnu
             addReplyBulk(c,ele);
         }
         dictReleaseIterator(di);
+        decrRefCount(dstset);
     } else {
         /* If we have a target key where to store the resulting set
          * create this key with the result set inside */
         deleteKey(c->db,dstkey);
-        dictAdd(c->db->dict,dstkey,dstset);
-        incrRefCount(dstkey);
-    }
-
-    /* Cleanup */
-    if (!dstkey) {
-        decrRefCount(dstset);
-    } else {
-        addReplySds(c,sdscatprintf(sdsempty(),":%lu\r\n",
-            dictSize((dict*)dstset->ptr)));
+        if (dictSize((dict*)dstset->ptr) > 0) {
+            dictAdd(c->db->dict,dstkey,dstset);
+            incrRefCount(dstkey);
+            addReplyLong(c,dictSize((dict*)dstset->ptr));
+        } else {
+            decrRefCount(dstset);
+            addReply(c,shared.czero);
+        }
         server.dirty++;
     }
     zfree(dv);
@@ -5414,6 +5485,7 @@ static void zremCommand(redisClient *c) {
     /* Delete from the hash table */
     dictDelete(zs->dict,c->argv[2]);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
+    if (dictSize(zs->dict) == 0) deleteKey(c->db,c->argv[1]);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -5431,6 +5503,7 @@ static void zremrangebyscoreCommand(redisClient *c) {
     zs = zsetobj->ptr;
     deleted = zslDeleteRangeByScore(zs->zsl,min,max,zs->dict);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
+    if (dictSize(zs->dict) == 0) deleteKey(c->db,c->argv[1]);
     server.dirty += deleted;
     addReplyLong(c,deleted);
 }
@@ -5465,6 +5538,7 @@ static void zremrangebyrankCommand(redisClient *c) {
      * use 1-based rank */
     deleted = zslDeleteRangeByRank(zs->zsl,start+1,end+1,zs->dict);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
+    if (dictSize(zs->dict) == 0) deleteKey(c->db,c->argv[1]);
     server.dirty += deleted;
     addReplyLong(c, deleted);
 }
@@ -5648,11 +5722,15 @@ static void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     }
 
     deleteKey(c->db,dstkey);
-    dictAdd(c->db->dict,dstkey,dstobj);
-    incrRefCount(dstkey);
-
-    addReplyLong(c, dstzset->zsl->length);
-    server.dirty++;
+    if (dstzset->zsl->length) {
+        dictAdd(c->db->dict,dstkey,dstobj);
+        incrRefCount(dstkey);
+        addReplyLong(c, dstzset->zsl->length);
+        server.dirty++;
+    } else {
+        decrRefCount(dstzset);
+        addReply(c, shared.czero);
+    }
     zfree(src);
 }
 
@@ -5985,6 +6063,80 @@ static void hsetCommand(redisClient *c) {
     addReplySds(c,sdscatprintf(sdsempty(),":%d\r\n",update == 0));
 }
 
+static void hincrbyCommand(redisClient *c) {
+    int update = 0;
+    long long value = 0, incr = 0;
+    robj *o = lookupKeyWrite(c->db,c->argv[1]);
+
+    if (o == NULL) {
+        o = createHashObject();
+        dictAdd(c->db->dict,c->argv[1],o);
+        incrRefCount(c->argv[1]);
+    } else {
+        if (o->type != REDIS_HASH) {
+            addReply(c,shared.wrongtypeerr);
+            return;
+        }
+    }
+
+    robj *o_incr = getDecodedObject(c->argv[3]);
+    incr = strtoll(o_incr->ptr, NULL, 10);
+    decrRefCount(o_incr);
+
+    if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+        unsigned char *zm = o->ptr;
+        unsigned char *zval;
+        unsigned int zvlen;
+
+        /* Find value if already present in hash */
+        if (zipmapGet(zm,c->argv[2]->ptr,sdslen(c->argv[2]->ptr),
+            &zval,&zvlen)) {
+            /* strtoll needs the char* to have a trailing \0, but
+             * the zipmap doesn't include them. */
+            sds szval = sdsnewlen(zval, zvlen);
+            value = strtoll(szval,NULL,10);
+            sdsfree(szval);
+        }
+
+        value += incr;
+        sds svalue = sdscatprintf(sdsempty(),"%lld",value);
+        zm = zipmapSet(zm,c->argv[2]->ptr,sdslen(c->argv[2]->ptr),
+            (unsigned char*)svalue,sdslen(svalue),&update);
+        sdsfree(svalue);
+        o->ptr = zm;
+
+        /* Check if the zipmap needs to be converted
+         * if this was not an update. */
+        if (!update && zipmapLen(zm) > server.hash_max_zipmap_entries)
+            convertToRealHash(o);
+    } else {
+        robj *hval;
+        dictEntry *de;
+
+        /* Find value if already present in hash */
+        de = dictFind(o->ptr,c->argv[2]);
+        if (de != NULL) {
+            hval = dictGetEntryVal(de);
+            if (hval->encoding == REDIS_ENCODING_RAW)
+                value = strtoll(hval->ptr,NULL,10);
+            else if (hval->encoding == REDIS_ENCODING_INT)
+                value = (long)hval->ptr;
+            else
+                redisAssert(1 != 1);
+        }
+
+        value += incr;
+        hval = createObject(REDIS_STRING,sdscatprintf(sdsempty(),"%lld",value));
+        tryObjectEncoding(hval);
+        if (dictReplace(o->ptr,c->argv[2],hval)) {
+            incrRefCount(c->argv[2]);
+        }
+    }
+
+    server.dirty++;
+    addReplyLong(c, value);
+}
+
 static void hgetCommand(redisClient *c) {
     robj *o;
 
@@ -6037,8 +6189,12 @@ static void hdelCommand(redisClient *c) {
             (unsigned char*) field->ptr,
             sdslen(field->ptr), &deleted);
         decrRefCount(field);
+        if (zipmapLen((unsigned char*) o->ptr) == 0)
+            deleteKey(c->db,c->argv[1]);
     } else {
         deleted = dictDelete((dict*)o->ptr,c->argv[2]) == DICT_OK;
+        if (htNeedsResize(o->ptr)) dictResize(o->ptr);
+        if (dictSize((dict*)o->ptr) == 0) deleteKey(c->db,c->argv[1]);
     }
     if (deleted) server.dirty++;
     addReply(c,deleted ? shared.cone : shared.czero);
@@ -6177,6 +6333,10 @@ static void flushdbCommand(redisClient *c) {
 static void flushallCommand(redisClient *c) {
     server.dirty += emptyDb();
     addReply(c,shared.ok);
+    if (server.bgsavechildpid != -1) {
+        kill(server.bgsavechildpid,SIGKILL);
+        rdbRemoveTempFile(server.bgsavechildpid);
+    }
     rdbSave(server.dbfilename);
     server.dirty++;
 }
@@ -6587,8 +6747,10 @@ static sds genRedisInfoString(void) {
         "bgrewriteaof_in_progress:%d\r\n"
         "total_connections_received:%lld\r\n"
         "total_commands_processed:%lld\r\n"
+        "expired_keys:%lld\r\n"
         "hash_max_zipmap_entries:%ld\r\n"
         "hash_max_zipmap_value:%ld\r\n"
+        "pubsub_classes:%ld\r\n"
         "vm_enabled:%d\r\n"
         "role:%s\r\n"
         ,REDIS_VERSION,
@@ -6608,8 +6770,10 @@ static sds genRedisInfoString(void) {
         server.bgrewritechildpid != -1,
         server.stat_numconnections,
         server.stat_numcommands,
+        server.stat_expiredkeys,
         server.hash_max_zipmap_entries,
         server.hash_max_zipmap_value,
+        dictSize(server.pubsub_classes),
         server.vm_enabled != 0,
         server.masterhost == NULL ? "master" : "slave"
     );
@@ -6731,6 +6895,7 @@ static int expireIfNeeded(redisDb *db, robj *key) {
 
     /* Delete the key */
     dictDelete(db->expires,key);
+    server.stat_expiredkeys++;
     return dictDelete(db->dict,key) == DICT_OK;
 }
 
@@ -6743,6 +6908,7 @@ static int deleteIfVolatile(redisDb *db, robj *key) {
 
     /* Delete the key */
     server.dirty++;
+    server.stat_expiredkeys++;
     dictDelete(db->expires,key);
     return dictDelete(db->dict,key) == DICT_OK;
 }
@@ -9090,6 +9256,229 @@ static void handleClientsBlockedOnSwappedKey(redisDb *db, robj *key) {
     }
 }
 
+/* =========================== Remote Configuration ========================= */
+
+static void configSetCommand(redisClient *c) {
+    robj *o = getDecodedObject(c->argv[3]);
+    if (!strcasecmp(c->argv[2]->ptr,"dbfilename")) {
+        zfree(server.dbfilename);
+        server.dbfilename = zstrdup(o->ptr);
+    } else if (!strcasecmp(c->argv[2]->ptr,"requirepass")) {
+        zfree(server.requirepass);
+        server.requirepass = zstrdup(o->ptr);
+    } else if (!strcasecmp(c->argv[2]->ptr,"masterauth")) {
+        zfree(server.masterauth);
+        server.masterauth = zstrdup(o->ptr);
+    } else if (!strcasecmp(c->argv[2]->ptr,"maxmemory")) {
+        server.maxmemory = strtoll(o->ptr, NULL, 10);
+    } else {
+        addReplySds(c,sdscatprintf(sdsempty(),
+            "-ERR not supported CONFIG parameter %s\r\n",
+            (char*)c->argv[2]->ptr));
+        decrRefCount(o);
+        return;
+    }
+    decrRefCount(o);
+    addReply(c,shared.ok);
+}
+
+static void configGetCommand(redisClient *c) {
+    robj *o = getDecodedObject(c->argv[2]);
+    robj *lenobj = createObject(REDIS_STRING,NULL);
+    char *pattern = o->ptr;
+    int matches = 0;
+
+    addReply(c,lenobj);
+    decrRefCount(lenobj);
+
+    if (stringmatch(pattern,"dbfilename",0)) {
+        addReplyBulkCString(c,"dbfilename");
+        addReplyBulkCString(c,server.dbfilename);
+        matches++;
+    }
+    if (stringmatch(pattern,"requirepass",0)) {
+        addReplyBulkCString(c,"requirepass");
+        addReplyBulkCString(c,server.requirepass);
+        matches++;
+    }
+    if (stringmatch(pattern,"masterauth",0)) {
+        addReplyBulkCString(c,"masterauth");
+        addReplyBulkCString(c,server.masterauth);
+        matches++;
+    }
+    if (stringmatch(pattern,"maxmemory",0)) {
+        char buf[128];
+
+        snprintf(buf,128,"%llu\n",server.maxmemory);
+        addReplyBulkCString(c,"maxmemory");
+        addReplyBulkCString(c,buf);
+        matches++;
+    }
+    decrRefCount(o);
+    lenobj->ptr = sdscatprintf(sdsempty(),"*%d\r\n",matches*2);
+}
+
+static void configCommand(redisClient *c) {
+    if (!strcasecmp(c->argv[1]->ptr,"set")) {
+        if (c->argc != 4) goto badarity;
+        configSetCommand(c);
+    } else if (!strcasecmp(c->argv[1]->ptr,"get")) {
+        if (c->argc != 3) goto badarity;
+        configGetCommand(c);
+    } else if (!strcasecmp(c->argv[1]->ptr,"resetstat")) {
+        if (c->argc != 2) goto badarity;
+        server.stat_numcommands = 0;
+        server.stat_numconnections = 0;
+        server.stat_expiredkeys = 0;
+        server.stat_starttime = time(NULL);
+        addReply(c,shared.ok);
+    } else {
+        addReplySds(c,sdscatprintf(sdsempty(),
+            "-ERR CONFIG subcommand must be one of GET, SET, RESETSTAT\r\n"));
+    }
+    return;
+
+badarity:
+    addReplySds(c,sdscatprintf(sdsempty(),
+        "-ERR Wrong number of arguments for CONFIG %s\r\n",
+        (char*) c->argv[1]->ptr));
+}
+
+/* =========================== Pubsub implementation ======================== */
+
+/* Subscribe a client to a class. Returns 1 if the operation succeeded, or
+ * 0 if the client was already subscribed to that class. */
+static int pubsubSubscribe(redisClient *c, robj *class) {
+    struct dictEntry *de;
+    list *clients = NULL;
+    int retval = 0;
+
+    /* Add the class to the client -> classes hash table */
+    if (dictAdd(c->pubsub_classes,class,NULL) == DICT_OK) {
+        retval = 1;
+        incrRefCount(class);
+        /* Add the client to the class -> list of clients hash table */
+        de = dictFind(server.pubsub_classes,class);
+        if (de == NULL) {
+            clients = listCreate();
+            dictAdd(server.pubsub_classes,class,clients);
+            incrRefCount(class);
+        } else {
+            clients = dictGetEntryVal(de);
+        }
+        listAddNodeTail(clients,c);
+    }
+    /* Notify the client */
+    addReply(c,shared.mbulk3);
+    addReply(c,shared.subscribebulk);
+    addReplyBulk(c,class);
+    addReplyLong(c,dictSize(c->pubsub_classes));
+    return retval;
+}
+
+/* Unsubscribe a client from a class. Returns 1 if the operation succeeded, or
+ * 0 if the client was not subscribed to the specified class. */
+static int pubsubUnsubscribe(redisClient *c, robj *class, int notify) {
+    struct dictEntry *de;
+    list *clients;
+    listNode *ln;
+    int retval = 0;
+
+    /* Remove the class from the client -> classes hash table */
+    incrRefCount(class); /* class may be just a pointer to the same object
+                            we have in the hash tables. Protect it... */
+    if (dictDelete(c->pubsub_classes,class) == DICT_OK) {
+        retval = 1;
+        /* Remove the client from the class -> clients list hash table */
+        de = dictFind(server.pubsub_classes,class);
+        assert(de != NULL);
+        clients = dictGetEntryVal(de);
+        ln = listSearchKey(clients,c);
+        assert(ln != NULL);
+        listDelNode(clients,ln);
+        if (listLength(clients) == 0) {
+            /* Free the list and associated hash entry at all if this was
+             * the latest client, so that it will be possible to abuse
+             * Redis PUBSUB creating millions of classes. */
+            dictDelete(server.pubsub_classes,class);
+        }
+    }
+    /* Notify the client */
+    if (notify) {
+        addReply(c,shared.mbulk3);
+        addReply(c,shared.unsubscribebulk);
+        addReplyBulk(c,class);
+        addReplyLong(c,dictSize(c->pubsub_classes));
+    }
+    decrRefCount(class); /* it is finally safe to release it */
+    return retval;
+}
+
+/* Unsubscribe from all the classes. Return the number of classes the
+ * client was subscribed to. */
+static int pubsubUnsubscribeAll(redisClient *c, int notify) {
+    dictIterator *di = dictGetIterator(c->pubsub_classes);
+    dictEntry *de;
+    int count = 0;
+
+    while((de = dictNext(di)) != NULL) {
+        robj *class = dictGetEntryKey(de);
+
+        count += pubsubUnsubscribe(c,class,notify);
+    }
+    dictReleaseIterator(di);
+    return count;
+}
+
+/* Publish a message */
+static int pubsubPublishMessage(robj *class, robj *message) {
+    int receivers = 0;
+    struct dictEntry *de;
+
+    de = dictFind(server.pubsub_classes,class);
+    if (de) {
+        list *list = dictGetEntryVal(de);
+        listNode *ln;
+        listIter li;
+
+        listRewind(list,&li);
+        while ((ln = listNext(&li)) != NULL) {
+            redisClient *c = ln->value;
+
+            addReply(c,shared.mbulk3);
+            addReply(c,shared.messagebulk);
+            addReplyBulk(c,class);
+            addReplyBulk(c,message);
+            receivers++;
+        }
+    }
+    return receivers;
+}
+
+static void subscribeCommand(redisClient *c) {
+    int j;
+
+    for (j = 1; j < c->argc; j++)
+        pubsubSubscribe(c,c->argv[j]);
+}
+
+static void unsubscribeCommand(redisClient *c) {
+    if (c->argc == 1) {
+        pubsubUnsubscribeAll(c,1);
+        return;
+    } else {
+        int j;
+
+        for (j = 1; j < c->argc; j++)
+            pubsubUnsubscribe(c,c->argv[j],1);
+    }
+}
+
+static void publishCommand(redisClient *c) {
+    int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);
+    addReplyLong(c,receivers);
+}
+
 /* ================================= Debugging ============================== */
 
 static void debugCommand(redisClient *c) {
@@ -9247,6 +9636,7 @@ static void version() {
 
 static void usage() {
     fprintf(stderr,"Usage: ./redis-server [/path/to/redis.conf]\n");
+    fprintf(stderr,"       ./redis-server - (read config from stdin)\n");
     exit(1);
 }
 
