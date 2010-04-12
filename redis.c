@@ -550,6 +550,7 @@ typedef struct zset {
 
 /* Our shared "common" objects */
 
+#define REDIS_SHARED_INTEGERS 10000
 struct sharedObjectsStruct {
     robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *pong, *space,
     *colon, *nullbulk, *nullmultibulk, *queued,
@@ -558,7 +559,7 @@ struct sharedObjectsStruct {
     *select0, *select1, *select2, *select3, *select4,
     *select5, *select6, *select7, *select8, *select9,
     *messagebulk, *subscribebulk, *unsubscribebulk, *mbulk3,
-    *psubscribebulk, *punsubscribebulk;
+    *psubscribebulk, *punsubscribebulk, *integers[REDIS_SHARED_INTEGERS];
 } shared;
 
 /* Global vars that are actally used as constants. The following double
@@ -601,7 +602,7 @@ static robj *dupStringObject(robj *o);
 static void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc);
 static int syncWithMaster(void);
-static int tryObjectEncoding(robj *o);
+static robj *tryObjectEncoding(robj *o);
 static robj *getDecodedObject(robj *o);
 static int removeExpire(redisDb *db, robj *key);
 static int expireIfNeeded(redisDb *db, robj *key);
@@ -748,6 +749,7 @@ static void substrCommand(redisClient *c);
 static void zrankCommand(redisClient *c);
 static void zrevrankCommand(redisClient *c);
 static void hsetCommand(redisClient *c);
+static void hmsetCommand(redisClient *c);
 static void hgetCommand(redisClient *c);
 static void hdelCommand(redisClient *c);
 static void hlenCommand(redisClient *c);
@@ -824,6 +826,7 @@ static struct redisCommand cmdTable[] = {
     {"zrank",zrankCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"zrevrank",zrevrankCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hset",hsetCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"hmset",hmsetCommand,-4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"hincrby",hincrbyCommand,4,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"hget",hgetCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hdel",hdelCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
@@ -1536,6 +1539,8 @@ static void beforeSleep(struct aeEventLoop *eventLoop) {
 }
 
 static void createSharedObjects(void) {
+    int j;
+
     shared.crlf = createObject(REDIS_STRING,sdsnew("\r\n"));
     shared.ok = createObject(REDIS_STRING,sdsnew("+OK\r\n"));
     shared.err = createObject(REDIS_STRING,sdsnew("-ERR\r\n"));
@@ -1576,6 +1581,10 @@ static void createSharedObjects(void) {
     shared.psubscribebulk = createStringObject("$10\r\npsubscribe\r\n",17);
     shared.punsubscribebulk = createStringObject("$12\r\npunsubscribe\r\n",19);
     shared.mbulk3 = createStringObject("*3\r\n",4);
+    for (j = 0; j < REDIS_SHARED_INTEGERS; j++) {
+        shared.integers[j] = createObject(REDIS_STRING,(void*)(long)j);
+        shared.integers[j]->encoding = REDIS_ENCODING_INT;
+    }
 }
 
 static void appendServerSaveParams(time_t seconds, int changes) {
@@ -2352,7 +2361,7 @@ static int processCommand(redisClient *c) {
     }
     /* Let's try to encode the bulk object to save space. */
     if (cmd->flags & REDIS_CMD_BULK)
-        tryObjectEncoding(c->argv[c->argc-1]);
+        c->argv[c->argc-1] = tryObjectEncoding(c->argv[c->argc-1]);
 
     /* Check if the user is authenticated */
     if (server.requirepass && !c->authenticated && cmd->proc != authCommand) {
@@ -3038,29 +3047,35 @@ static int isStringRepresentableAsLong(sds s, long *longval) {
 }
 
 /* Try to encode a string object in order to save space */
-static int tryObjectEncoding(robj *o) {
+static robj *tryObjectEncoding(robj *o) {
     long value;
     sds s = o->ptr;
 
     if (o->encoding != REDIS_ENCODING_RAW)
-        return REDIS_ERR; /* Already encoded */
+        return o; /* Already encoded */
 
-    /* It's not save to encode shared objects: shared objects can be shared
+    /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis. Encoded objects can only
      * appear as "values" (and not, for instance, as keys) */
-     if (o->refcount > 1) return REDIS_ERR;
+     if (o->refcount > 1) return o;
 
     /* Currently we try to encode only strings */
     redisAssert(o->type == REDIS_STRING);
 
     /* Check if we can represent this string as a long integer */
-    if (isStringRepresentableAsLong(s,&value) == REDIS_ERR) return REDIS_ERR;
+    if (isStringRepresentableAsLong(s,&value) == REDIS_ERR) return o;
 
     /* Ok, this object can be encoded */
-    o->encoding = REDIS_ENCODING_INT;
-    sdsfree(o->ptr);
-    o->ptr = (void*) value;
-    return REDIS_OK;
+    if (value >= 0 && value < REDIS_SHARED_INTEGERS) {
+        decrRefCount(o);
+        incrRefCount(shared.integers[value]);
+        return shared.integers[value];
+    } else {
+        o->encoding = REDIS_ENCODING_INT;
+        sdsfree(o->ptr);
+        o->ptr = (void*) value;
+        return o;
+    }
 }
 
 /* Get a decoded version of an encoded object (returned as a new object).
@@ -3678,7 +3693,7 @@ static robj *rdbLoadObject(int type, FILE *fp) {
     if (type == REDIS_STRING) {
         /* Read string value */
         if ((o = rdbLoadStringObject(fp)) == NULL) return NULL;
-        tryObjectEncoding(o);
+        o = tryObjectEncoding(o);
     } else if (type == REDIS_LIST || type == REDIS_SET) {
         /* Read list/set value */
         uint32_t listlen;
@@ -3694,7 +3709,7 @@ static robj *rdbLoadObject(int type, FILE *fp) {
             robj *ele;
 
             if ((ele = rdbLoadStringObject(fp)) == NULL) return NULL;
-            tryObjectEncoding(ele);
+            ele = tryObjectEncoding(ele);
             if (type == REDIS_LIST) {
                 listAddNodeTail((list*)o->ptr,ele);
             } else {
@@ -3715,7 +3730,7 @@ static robj *rdbLoadObject(int type, FILE *fp) {
             double *score = zmalloc(sizeof(double));
 
             if ((ele = rdbLoadStringObject(fp)) == NULL) return NULL;
-            tryObjectEncoding(ele);
+            ele = tryObjectEncoding(ele);
             if (rdbLoadDoubleValue(fp,score) == -1) return NULL;
             dictAdd(zs->dict,ele,score);
             zslInsert(zs->zsl,*score,ele);
@@ -3754,8 +3769,8 @@ static robj *rdbLoadObject(int type, FILE *fp) {
                 decrRefCount(key);
                 decrRefCount(val);
             } else {
-                tryObjectEncoding(key);
-                tryObjectEncoding(val);
+                key = tryObjectEncoding(key);
+                val = tryObjectEncoding(val);
                 dictAdd((dict*)o->ptr,key,val);
             }
         }
@@ -3981,7 +3996,7 @@ static void msetGenericCommand(redisClient *c, int nx) {
     for (j = 1; j < c->argc; j += 2) {
         int retval;
 
-        tryObjectEncoding(c->argv[j+1]);
+        c->argv[j+1] = tryObjectEncoding(c->argv[j+1]);
         retval = dictAdd(c->db->dict,c->argv[j],c->argv[j+1]);
         if (retval == DICT_ERR) {
             dictReplace(c->db->dict,c->argv[j],c->argv[j+1]);
@@ -4029,7 +4044,7 @@ static void incrDecrCommand(redisClient *c, long long incr) {
 
     value += incr;
     o = createObject(REDIS_STRING,sdscatprintf(sdsempty(),"%lld",value));
-    tryObjectEncoding(o);
+    o = tryObjectEncoding(o);
     retval = dictAdd(c->db->dict,c->argv[1],o);
     if (retval == DICT_ERR) {
         dictReplace(c->db->dict,c->argv[1],o);
@@ -4537,8 +4552,8 @@ static void lrangeCommand(redisClient *c) {
     listNode *ln;
     robj *ele;
 
-    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.nullmultibulk)) == NULL ||
-        checkType(c,o,REDIS_LIST)) return;
+    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptymultibulk)) == NULL
+         || checkType(c,o,REDIS_LIST)) return;
     list = o->ptr;
     llen = listLength(list);
 
@@ -4871,7 +4886,7 @@ static void sinterGenericCommand(redisClient *c, robj **setskeys, unsigned long 
                     server.dirty++;
                 addReply(c,shared.czero);
             } else {
-                addReply(c,shared.nullmultibulk);
+                addReply(c,shared.emptymultibulk);
             }
             return;
         }
@@ -5766,8 +5781,8 @@ static void zrangeGenericCommand(redisClient *c, int reverse) {
         return;
     }
 
-    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.nullmultibulk)) == NULL ||
-        checkType(c,o,REDIS_ZSET)) return;
+    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptymultibulk)) == NULL
+         || checkType(c,o,REDIS_ZSET)) return;
     zsetobj = o->ptr;
     zsl = zsetobj->zsl;
     llen = zsl->length;
@@ -5873,7 +5888,7 @@ static void genericZrangebyscoreCommand(redisClient *c, int justcount) {
     /* Ok, lookup the key and get the range */
     o = lookupKeyRead(c->db,c->argv[1]);
     if (o == NULL) {
-        addReply(c,justcount ? shared.czero : shared.nullmultibulk);
+        addReply(c,justcount ? shared.czero : shared.emptymultibulk);
     } else {
         if (o->type != REDIS_ZSET) {
             addReply(c,shared.wrongtypeerr);
@@ -6052,7 +6067,7 @@ static void hsetCommand(redisClient *c) {
         if (zipmapLen(zm) > server.hash_max_zipmap_entries)
             convertToRealHash(o);
     } else {
-        tryObjectEncoding(c->argv[2]);
+        c->argv[2] = tryObjectEncoding(c->argv[2]);
         /* note that c->argv[3] is already encoded, as the latest arg
          * of a bulk command is always integer encoded if possible. */
         if (dictReplace(o->ptr,c->argv[2],c->argv[3])) {
@@ -6064,6 +6079,70 @@ static void hsetCommand(redisClient *c) {
     }
     server.dirty++;
     addReplySds(c,sdscatprintf(sdsempty(),":%d\r\n",update == 0));
+}
+
+static void hmsetCommand(redisClient *c) {
+    int i;
+    robj *o, *key, *val;
+
+    if ((c->argc % 2) == 1) {
+        addReplySds(c,sdsnew("-ERR wrong number of arguments for HMSET\r\n"));
+        return;
+    }
+
+    if ((o = lookupKeyWrite(c->db,c->argv[1])) == NULL) {
+        o = createHashObject();
+        dictAdd(c->db->dict,c->argv[1],o);
+        incrRefCount(c->argv[1]);
+    } else {
+        if (o->type != REDIS_HASH) {
+            addReply(c,shared.wrongtypeerr);
+            return;
+        }
+    }
+
+    /* We want to convert the zipmap into an hash table right now if the
+     * entry to be added is too big. */
+    if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+        for (i = 2; i < c->argc; i+=2) {
+            if ((c->argv[i]->encoding == REDIS_ENCODING_RAW &&
+                  sdslen(c->argv[i]->ptr) > server.hash_max_zipmap_value) ||
+                (c->argv[i+1]->encoding == REDIS_ENCODING_RAW &&
+                  sdslen(c->argv[i+1]->ptr) > server.hash_max_zipmap_value)) {
+                convertToRealHash(o);
+                break;
+            }
+        }
+    }
+
+    if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+        unsigned char *zm = o->ptr;
+
+        for (i = 2; i < c->argc; i+=2) {
+            key = getDecodedObject(c->argv[i]);
+            val = getDecodedObject(c->argv[i+1]);
+            zm = zipmapSet(zm,key->ptr,sdslen(key->ptr),
+                              val->ptr,sdslen(val->ptr),NULL);
+            decrRefCount(key);
+            decrRefCount(val);
+            o->ptr = zm;
+        }
+
+        /* And here there is the second check for hash conversion. */
+        if (zipmapLen(zm) > server.hash_max_zipmap_entries)
+            convertToRealHash(o);
+    } else {
+        for (i = 2; i < c->argc; i+=2) {
+            key = tryObjectEncoding(c->argv[i]);
+            val = tryObjectEncoding(c->argv[i+1]);
+            if (dictReplace(o->ptr,key,val)) {
+                incrRefCount(key);
+            }
+            incrRefCount(val);
+        }
+    }
+
+    addReply(c, shared.ok);
 }
 
 static void hincrbyCommand(redisClient *c) {
@@ -6125,7 +6204,7 @@ static void hincrbyCommand(redisClient *c) {
 
         value += incr;
         hval = createObject(REDIS_STRING,sdscatprintf(sdsempty(),"%lld",value));
-        tryObjectEncoding(hval);
+        hval = tryObjectEncoding(hval);
         if (dictReplace(o->ptr,c->argv[2],hval)) {
             incrRefCount(c->argv[2]);
         }
@@ -6216,7 +6295,7 @@ static void genericHgetallCommand(redisClient *c, int flags) {
     robj *o, *lenobj;
     unsigned long count = 0;
 
-    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.nullmultibulk)) == NULL
+    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptymultibulk)) == NULL
         || checkType(c,o,REDIS_HASH)) return;
 
     lenobj = createObject(REDIS_STRING,NULL);
@@ -6310,8 +6389,8 @@ static void convertToRealHash(robj *o) {
 
         keyobj = createStringObject((char*)key,klen);
         valobj = createStringObject((char*)val,vlen);
-        tryObjectEncoding(keyobj);
-        tryObjectEncoding(valobj);
+        keyobj = tryObjectEncoding(keyobj);
+        valobj = tryObjectEncoding(valobj);
         dictAdd(dict,keyobj,valobj);
     }
     o->encoding = REDIS_ENCODING_HT;
@@ -6456,7 +6535,7 @@ static void sortCommand(redisClient *c) {
     /* Lookup the key to sort. It must be of the right types */
     sortval = lookupKeyRead(c->db,c->argv[1]);
     if (sortval == NULL) {
-        addReply(c,shared.nullmultibulk);
+        addReply(c,shared.emptymultibulk);
         return;
     }
     if (sortval->type != REDIS_SET && sortval->type != REDIS_LIST &&
@@ -7823,7 +7902,7 @@ int loadAppendOnlyFile(char *filename) {
         }
         /* Try object encoding */
         if (cmd->flags & REDIS_CMD_BULK)
-            tryObjectEncoding(argv[argc-1]);
+            argv[argc-1] = tryObjectEncoding(argv[argc-1]);
         /* Run the command in the context of a fake client */
         fakeClient->argc = argc;
         fakeClient->argv = argv;
