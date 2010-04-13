@@ -234,7 +234,7 @@ proc main {server port} {
 
     # The following AUTH test should be enabled only when requirepass
     # <PASSWORD> is set in redis.conf and redis-server was started with
-    # redis.conf as the first argument.  
+    # redis.conf as the first argument.
 
     #test {AUTH with requirepass in redis.conf} {
     #    $r auth foobared
@@ -359,10 +359,18 @@ proc main {server port} {
         $r incrby novar 17179869184
     } {34359738368}
 
-    test {INCR against key with spaces (no integer encoded)} {
+    test {INCR fails against key with spaces (no integer encoded)} {
         $r set novar "    11    "
-        $r incr novar
-    } {12}
+        catch {$r incr novar} err
+        format $err
+    } {ERR*}
+
+    test {INCR fails against a key holding a list} {
+        $r rpush mylist 1
+        catch {$r incr novar} err
+        $r rpop mylist
+        format $err
+    } {ERR*}
 
     test {DECRBY over 32bit value with over 32bit increment, negative res} {
         $r set novar 17179869184
@@ -831,7 +839,7 @@ proc main {server port} {
     test {SUNION with two sets} {
         lsort [$r sunion set1 set2]
     } [lsort -uniq "[$r smembers set1] [$r smembers set2]"]
-    
+
     test {SINTERSTORE with two sets} {
         $r sinterstore setres set1 set2
         lsort [$r smembers setres]
@@ -902,9 +910,9 @@ proc main {server port} {
         $r lpush mysavelist world
         $r set myemptykey {}
         $r set mynormalkey {blablablba}
-        $r zadd mytestzset a 10
-        $r zadd mytestzset b 20
-        $r zadd mytestzset c 30
+        $r zadd mytestzset 10 a
+        $r zadd mytestzset 20 b
+        $r zadd mytestzset 30 c
         $r save
     } {OK}
 
@@ -920,7 +928,7 @@ proc main {server port} {
         }
         lsort [array names myset]
     } {a b c}
-    
+
     test {Create a random list and a random set} {
         set tosort {}
         array set seenrand {}
@@ -1662,6 +1670,46 @@ proc main {server port} {
         }
         $r hmset bighash {*}$args
     } {OK}
+
+    test {HMGET against non existing key and fields} {
+        set rv {}
+        lappend rv [$r hmget doesntexist __123123123__ __456456456__]
+        lappend rv [$r hmget smallhash __123123123__ __456456456__]
+        lappend rv [$r hmget bighash __123123123__ __456456456__]
+        set _ $rv
+    } {{{} {}} {{} {}} {{} {}}}
+
+    test {HMGET - small hash} {
+        set keys {}
+        set vals {}
+        foreach {k v} [array get smallhash] {
+            lappend keys $k
+            lappend vals $v
+        }
+        set err {}
+        set result [$r hmget smallhash {*}$keys]
+        if {$vals ne $result} {
+            set err "$vals != $result"
+            break
+        }
+        set _ $err
+    } {}
+
+    test {HMGET - big hash} {
+        set keys {}
+        set vals {}
+        foreach {k v} [array get bighash] {
+            lappend keys $k
+            lappend vals $v
+        }
+        set err {}
+        set result [$r hmget bighash {*}$keys]
+        if {$vals ne $result} {
+            set err "$vals != $result"
+            break
+        }
+        set _ $err
+    } {}
 
     test {HKEYS - small hash} {
         lsort [$r hkeys smallhash]

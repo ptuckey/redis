@@ -749,8 +749,9 @@ static void substrCommand(redisClient *c);
 static void zrankCommand(redisClient *c);
 static void zrevrankCommand(redisClient *c);
 static void hsetCommand(redisClient *c);
-static void hmsetCommand(redisClient *c);
 static void hgetCommand(redisClient *c);
+static void hmsetCommand(redisClient *c);
+static void hmgetCommand(redisClient *c);
 static void hdelCommand(redisClient *c);
 static void hlenCommand(redisClient *c);
 static void zremrangebyrankCommand(redisClient *c);
@@ -826,9 +827,10 @@ static struct redisCommand cmdTable[] = {
     {"zrank",zrankCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"zrevrank",zrevrankCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hset",hsetCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
-    {"hmset",hmsetCommand,-4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
-    {"hincrby",hincrbyCommand,4,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"hget",hgetCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
+    {"hmset",hmsetCommand,-4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"hmget",hmgetCommand,-3,REDIS_CMD_BULK,NULL,1,1,1},
+    {"hincrby",hincrbyCommand,4,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"hdel",hdelCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"hlen",hlenCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"hkeys",hkeysCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
@@ -1747,15 +1749,12 @@ static void loadServerConfig(char *filename) {
     char buf[REDIS_CONFIGLINE_MAX+1], *err = NULL;
     int linenum = 0;
     sds line = NULL;
-    char *errormsg = "Fatal error, can't open config file '%s'";
-    char *errorbuf = zmalloc(sizeof(char)*(strlen(errormsg)+strlen(filename)));
-    sprintf(errorbuf, errormsg, filename);
 
     if (filename[0] == '-' && filename[1] == '\0')
         fp = stdin;
     else {
         if ((fp = fopen(filename,"r")) == NULL) {
-            redisLog(REDIS_WARNING, errorbuf);
+            redisLog(REDIS_WARNING, "Fatal error, can't open config file '%s'", filename);
             exit(1);
         }
     }
@@ -2056,7 +2055,7 @@ static void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask)
 
     /* Use writev() if we have enough buffers to send */
     if (!server.glueoutputbuf &&
-        listLength(c->reply) > REDIS_WRITEV_THRESHOLD && 
+        listLength(c->reply) > REDIS_WRITEV_THRESHOLD &&
         !(c->flags & REDIS_MASTER))
     {
         sendReplyToClientWritev(el, fd, privdata, mask);
@@ -2134,7 +2133,7 @@ static void sendReplyToClientWritev(aeEventLoop *el, int fd, void *privdata, int
             o = listNodeValue(node);
             objlen = sdslen(o->ptr);
 
-            if (totwritten + objlen - offset > REDIS_MAX_WRITE_PER_EVENT) 
+            if (totwritten + objlen - offset > REDIS_MAX_WRITE_PER_EVENT)
                 break;
 
             if(ion == REDIS_WRITEV_IOVEC_COUNT)
@@ -2182,7 +2181,7 @@ static void sendReplyToClientWritev(aeEventLoop *el, int fd, void *privdata, int
         }
     }
 
-    if (totwritten > 0) 
+    if (totwritten > 0)
         c->lastinteraction = time(NULL);
 
     if (listLength(c->reply) == 0) {
@@ -2492,7 +2491,7 @@ again:
         if (p) {
             sds query, *argv;
             int argc, j;
-            
+
             query = c->querybuf;
             c->querybuf = sdsempty();
             querylen = 1+(p-(query));
@@ -3034,7 +3033,7 @@ static int isStringRepresentableAsLong(sds s, long *longval) {
     char buf[32], *endptr;
     long value;
     int slen;
-    
+
     value = strtol(s, &endptr, 10);
     if (endptr[0] != '\0') return REDIS_ERR;
     slen = snprintf(buf,32,"%ld",value);
@@ -3082,7 +3081,7 @@ static robj *tryObjectEncoding(robj *o) {
  * If the object is already raw-encoded just increment the ref count. */
 static robj *getDecodedObject(robj *o) {
     robj *dec;
-    
+
     if (o->encoding == REDIS_ENCODING_RAW) {
         incrRefCount(o);
         return o;
@@ -3138,6 +3137,77 @@ static size_t stringObjectLen(robj *o) {
 
         return snprintf(buf,32,"%ld",(long)o->ptr);
     }
+}
+
+static int getDoubleFromObject(redisClient *c, robj *o, double *value) {
+    double parsedValue;
+    char *eptr = NULL;
+
+    if (o && o->type != REDIS_STRING) {
+        addReplySds(c,sdsnew("-ERR value is not a double\r\n"));
+        return REDIS_ERR;
+    }
+
+    if (o == NULL)
+        parsedValue = 0;
+    else if (o->encoding == REDIS_ENCODING_RAW)
+        parsedValue = strtod(o->ptr, &eptr);
+    else if (o->encoding == REDIS_ENCODING_INT)
+        parsedValue = (long)o->ptr;
+    else
+        redisAssert(1 != 1);
+
+    if (eptr != NULL && *eptr != '\0') {
+        addReplySds(c,sdsnew("-ERR value is not a double\r\n"));
+        return REDIS_ERR;
+    }
+
+    *value = parsedValue;
+
+    return REDIS_OK;
+}
+
+static int getLongLongFromObject(redisClient *c, robj *o, long long *value) {
+    long long parsedValue;
+    char *eptr = NULL;
+
+    if (o && o->type != REDIS_STRING) {
+        addReplySds(c,sdsnew("-ERR value is not an integer\r\n"));
+        return REDIS_ERR;
+    }
+
+    if (o == NULL)
+        parsedValue = 0;
+    else if (o->encoding == REDIS_ENCODING_RAW)
+        parsedValue = strtoll(o->ptr, &eptr, 10);
+    else if (o->encoding == REDIS_ENCODING_INT)
+        parsedValue = (long)o->ptr;
+    else
+        redisAssert(1 != 1);
+
+    if (eptr != NULL && *eptr != '\0') {
+        addReplySds(c,sdsnew("-ERR value is not an integer\r\n"));
+        return REDIS_ERR;
+    }
+
+    *value = parsedValue;
+
+    return REDIS_OK;
+}
+
+static int getLongFromObject(redisClient *c, robj *o, long *value) {
+    long long actualValue;
+
+    if (getLongLongFromObject(c, o, &actualValue) != REDIS_OK) return REDIS_ERR;
+
+    if (actualValue < LONG_MIN || actualValue > LONG_MAX) {
+        addReplySds(c,sdsnew("-ERR value is out of range\r\n"));
+        return REDIS_ERR;
+    }
+
+    *value = actualValue;
+
+    return REDIS_OK;
 }
 
 /*============================ RDB saving/loading =========================== */
@@ -3412,7 +3482,7 @@ static off_t rdbSavedObjectLen(robj *o, FILE *fp) {
 /* Return the number of pages required to save this object in the swap file */
 static off_t rdbSavedObjectPages(robj *o, FILE *fp) {
     off_t bytes = rdbSavedObjectLen(o,fp);
-    
+
     return (bytes+(server.vm_page_size-1))/server.vm_page_size;
 }
 
@@ -3495,7 +3565,7 @@ static int rdbSave(char *filename) {
     fflush(fp);
     fsync(fileno(fp));
     fclose(fp);
-    
+
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
     if (rename(tmpfile,filename) == -1) {
@@ -3925,7 +3995,7 @@ static void setnxCommand(redisClient *c) {
 
 static int getGenericCommand(redisClient *c) {
     robj *o;
-    
+
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.nullbulk)) == NULL)
         return REDIS_OK;
 
@@ -3956,7 +4026,7 @@ static void getsetCommand(redisClient *c) {
 
 static void mgetCommand(redisClient *c) {
     int j;
-  
+
     addReplySds(c,sdscatprintf(sdsempty(),"*%d\r\n",c->argc-1));
     for (j = 1; j < c->argc; j++) {
         robj *o = lookupKeyRead(c->db,c->argv[j]);
@@ -4023,24 +4093,10 @@ static void incrDecrCommand(redisClient *c, long long incr) {
     long long value;
     int retval;
     robj *o;
-    
-    o = lookupKeyWrite(c->db,c->argv[1]);
-    if (o == NULL) {
-        value = 0;
-    } else {
-        if (o->type != REDIS_STRING) {
-            value = 0;
-        } else {
-            char *eptr;
 
-            if (o->encoding == REDIS_ENCODING_RAW)
-                value = strtoll(o->ptr, &eptr, 10);
-            else if (o->encoding == REDIS_ENCODING_INT)
-                value = (long)o->ptr;
-            else
-                redisAssert(1 != 1);
-        }
-    }
+    o = lookupKeyWrite(c->db,c->argv[1]);
+
+    if (getLongLongFromObject(c, o, &value) != REDIS_OK) return;
 
     value += incr;
     o = createObject(REDIS_STRING,sdscatprintf(sdsempty(),"%lld",value));
@@ -4067,12 +4123,18 @@ static void decrCommand(redisClient *c) {
 }
 
 static void incrbyCommand(redisClient *c) {
-    long long incr = strtoll(c->argv[2]->ptr, NULL, 10);
+    long long incr;
+
+    if (getLongLongFromObject(c, c->argv[2], &incr) != REDIS_OK) return;
+
     incrDecrCommand(c,incr);
 }
 
 static void decrbyCommand(redisClient *c) {
-    long long incr = strtoll(c->argv[2]->ptr, NULL, 10);
+    long long incr;
+
+    if (getLongLongFromObject(c, c->argv[2], &incr) != REDIS_OK) return;
+
     incrDecrCommand(c,-incr);
 }
 
@@ -4090,7 +4152,7 @@ static void appendCommand(redisClient *c) {
         totlen = stringObjectLen(c->argv[2]);
     } else {
         dictEntry *de;
-       
+
         de = dictFind(c->db->dict,c->argv[1]);
         assert(de != NULL);
 
@@ -4179,7 +4241,7 @@ static void existsCommand(redisClient *c) {
 
 static void selectCommand(redisClient *c) {
     int id = atoi(c->argv[1]->ptr);
-    
+
     if (selectDb(c,id) == REDIS_ERR) {
         addReplySds(c,sdsnew("-ERR invalid DB index\r\n"));
     } else {
@@ -4189,7 +4251,7 @@ static void selectCommand(redisClient *c) {
 
 static void randomkeyCommand(redisClient *c) {
     dictEntry *de;
-   
+
     while(1) {
         de = dictGetRandomKey(c->db->dict);
         if (!de || expireIfNeeded(c->db,dictGetEntryKey(de)) == 0) break;
@@ -4317,7 +4379,7 @@ static void shutdownCommand(redisClient *c) {
              * in the next cron() Redis will be notified that the background
              * saving aborted, handling special stuff like slaves pending for
              * synchronization... */
-            redisLog(REDIS_WARNING,"Error trying to save the DB, can't exit"); 
+            redisLog(REDIS_WARNING,"Error trying to save the DB, can't exit");
             addReplySds(c,
                 sdsnew("-ERR can't quit, problems saving the DB\r\n"));
         }
@@ -4461,7 +4523,7 @@ static void llenCommand(redisClient *c) {
 
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,o,REDIS_LIST)) return;
-    
+
     l = o->ptr;
     addReplyUlong(c,listLength(l));
 }
@@ -4817,7 +4879,7 @@ static void scardCommand(redisClient *c) {
 
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,o,REDIS_SET)) return;
-    
+
     s = o->ptr;
     addReplyUlong(c,dictSize(s));
 }
@@ -5108,7 +5170,7 @@ static zskiplistNode *zslCreateNode(int level, double score, robj *obj) {
 static zskiplist *zslCreate(void) {
     int j;
     zskiplist *zsl;
-    
+
     zsl = zmalloc(sizeof(*zsl));
     zsl->level = 1;
     zsl->length = 0;
@@ -5441,7 +5503,7 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
     } else {
         dictEntry *de;
         double *oldscore;
-        
+
         /* case 2: Score update operation */
         de = dictFind(zs->dict,ele);
         redisAssert(de != NULL);
@@ -5470,14 +5532,16 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
 static void zaddCommand(redisClient *c) {
     double scoreval;
 
-    scoreval = strtod(c->argv[2]->ptr,NULL);
+    if (getDoubleFromObject(c, c->argv[2], &scoreval) != REDIS_OK) return;
+
     zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0);
 }
 
 static void zincrbyCommand(redisClient *c) {
     double scoreval;
 
-    scoreval = strtod(c->argv[2]->ptr,NULL);
+    if (getDoubleFromObject(c, c->argv[2], &scoreval) != REDIS_OK) return;
+
     zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,1);
 }
 
@@ -5511,11 +5575,14 @@ static void zremCommand(redisClient *c) {
 }
 
 static void zremrangebyscoreCommand(redisClient *c) {
-    double min = strtod(c->argv[2]->ptr,NULL);
-    double max = strtod(c->argv[3]->ptr,NULL);
+    double min;
+    double max;
     long deleted;
     robj *zsetobj;
     zset *zs;
+
+    if ((getDoubleFromObject(c, c->argv[2], &min) != REDIS_OK) ||
+        (getDoubleFromObject(c, c->argv[3], &max) != REDIS_OK)) return;
 
     if ((zsetobj = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,zsetobj,REDIS_ZSET)) return;
@@ -5529,12 +5596,15 @@ static void zremrangebyscoreCommand(redisClient *c) {
 }
 
 static void zremrangebyrankCommand(redisClient *c) {
-    int start = atoi(c->argv[2]->ptr);
-    int end = atoi(c->argv[3]->ptr);
+    long start;
+    long end;
     int llen;
     long deleted;
     robj *zsetobj;
     zset *zs;
+
+    if ((getLongFromObject(c, c->argv[2], &start) != REDIS_OK) ||
+        (getLongFromObject(c, c->argv[3], &end) != REDIS_OK)) return;
 
     if ((zsetobj = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,zsetobj,REDIS_ZSET)) return;
@@ -5642,7 +5712,8 @@ static void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
             if (remaining >= (zsetnum + 1) && !strcasecmp(c->argv[j]->ptr,"weights")) {
                 j++; remaining--;
                 for (i = 0; i < zsetnum; i++, j++, remaining--) {
-                    src[i].weight = strtod(c->argv[j]->ptr, NULL);
+                    if (getDoubleFromObject(c, c->argv[j], &src[i].weight) != REDIS_OK)
+                        return;
                 }
             } else if (remaining >= 2 && !strcasecmp(c->argv[j]->ptr,"aggregate")) {
                 j++; remaining--;
@@ -5764,8 +5835,8 @@ static void zinterCommand(redisClient *c) {
 
 static void zrangeGenericCommand(redisClient *c, int reverse) {
     robj *o;
-    int start = atoi(c->argv[2]->ptr);
-    int end = atoi(c->argv[3]->ptr);
+    long start;
+    long end;
     int withscores = 0;
     int llen;
     int rangelen, j;
@@ -5773,6 +5844,9 @@ static void zrangeGenericCommand(redisClient *c, int reverse) {
     zskiplist *zsl;
     zskiplistNode *ln;
     robj *ele;
+
+    if ((getLongFromObject(c, c->argv[2], &start) != REDIS_OK) ||
+        (getLongFromObject(c, c->argv[3], &end) != REDIS_OK)) return;
 
     if (c->argc == 5 && !strcasecmp(c->argv[4]->ptr,"withscores")) {
         withscores = 1;
@@ -6160,7 +6234,8 @@ static void hincrbyCommand(redisClient *c) {
         }
     }
 
-    incr = strtoll(c->argv[3]->ptr, NULL, 10);
+    if (getLongLongFromObject(c, c->argv[3], &incr) != REDIS_OK) return;
+
     if (o->encoding == REDIS_ENCODING_ZIPMAP) {
         unsigned char *zm = o->ptr;
         unsigned char *zval;
@@ -6248,6 +6323,55 @@ static void hgetCommand(redisClient *c) {
             robj *e = dictGetEntryVal(de);
 
             addReplyBulk(c,e);
+        }
+    }
+}
+
+static void hmgetCommand(redisClient *c) {
+    int i;
+
+    robj *o = lookupKeyRead(c->db, c->argv[1]);
+    if (o == NULL) {
+        addReplySds(c,sdscatprintf(sdsempty(),"*%d\r\n",c->argc-2));
+        for (i = 2; i < c->argc; i++) {
+            addReply(c,shared.nullbulk);
+        }
+        return;
+    } else {
+        if (o->type != REDIS_HASH) {
+            addReply(c,shared.wrongtypeerr);
+            return;
+        }
+    }
+
+    addReplySds(c,sdscatprintf(sdsempty(),"*%d\r\n",c->argc-2));
+    if (o->encoding == REDIS_ENCODING_ZIPMAP) {
+        unsigned char *zm = o->ptr;
+        unsigned char *v;
+        unsigned int vlen;
+        robj *field;
+
+        for (i = 2; i < c->argc; i++) {
+            field = getDecodedObject(c->argv[i]);
+            if (zipmapGet(zm,field->ptr,sdslen(field->ptr),&v,&vlen)) {
+                addReplySds(c,sdscatprintf(sdsempty(),"$%u\r\n", vlen));
+                addReplySds(c,sdsnewlen(v,vlen));
+                addReply(c,shared.crlf);
+            } else {
+                addReply(c,shared.nullbulk);
+            }
+            decrRefCount(field);
+        }
+    } else {
+        dictEntry *de;
+
+        for (i = 2; i < c->argc; i++) {
+            de = dictFind(o->ptr,c->argv[i]);
+            if (de != NULL) {
+                addReplyBulk(c,(robj*)dictGetEntryVal(de));
+            } else {
+                addReply(c,shared.nullbulk);
+            }
         }
     }
 }
@@ -6992,8 +7116,13 @@ static int deleteIfVolatile(redisDb *db, robj *key) {
     return dictDelete(db->dict,key) == DICT_OK;
 }
 
-static void expireGenericCommand(redisClient *c, robj *key, time_t seconds) {
+static void expireGenericCommand(redisClient *c, robj *key, robj *param, long offset) {
     dictEntry *de;
+    time_t seconds;
+
+    if (getLongFromObject(c, param, &seconds) != REDIS_OK) return;
+
+    seconds -= offset;
 
     de = dictFind(c->db->dict,key);
     if (de == NULL) {
@@ -7017,11 +7146,11 @@ static void expireGenericCommand(redisClient *c, robj *key, time_t seconds) {
 }
 
 static void expireCommand(redisClient *c) {
-    expireGenericCommand(c,c->argv[1],strtol(c->argv[2]->ptr,NULL,10));
+    expireGenericCommand(c,c->argv[1],c->argv[2],0);
 }
 
 static void expireatCommand(redisClient *c) {
-    expireGenericCommand(c,c->argv[1],strtol(c->argv[2]->ptr,NULL,10)-time(NULL));
+    expireGenericCommand(c,c->argv[1],c->argv[2],time(NULL));
 }
 
 static void ttlCommand(redisClient *c) {
@@ -7265,7 +7394,7 @@ static void blockingPopGenericCommand(redisClient *c, int where) {
                      * non-blocking POP operation */
                     robj *argv[2], **orig_argv;
                     int orig_argc;
-                   
+
                     /* We need to alter the command arguments before to call
                      * popGenericCommand() as the command takes a single key. */
                     orig_argv = c->argv;
@@ -7502,7 +7631,7 @@ static void updateSlavesWaitingBgsave(int bgsaveerr) {
             slave->replstate = REDIS_REPL_WAIT_BGSAVE_END;
         } else if (slave->replstate == REDIS_REPL_WAIT_BGSAVE_END) {
             struct redis_stat buf;
-           
+
             if (bgsaveerr != REDIS_OK) {
                 freeClient(slave);
                 redisLog(REDIS_WARNING,"SYNC failed. BGSAVE child returned an error");
@@ -8159,7 +8288,7 @@ static int rewriteAppendOnlyFile(char *filename) {
     fflush(fp);
     fsync(fileno(fp));
     fclose(fp);
-    
+
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
     if (rename(tmpfile,filename) == -1) {
@@ -8277,7 +8406,7 @@ static void aofRemoveTempFile(pid_t childpid) {
 static void expandVmSwapFilename(void) {
     char *p = strstr(server.vm_swap_file,"%p");
     sds new;
-    
+
     if (!p) return;
     new = sdsempty();
     *p = '\0';
@@ -8402,7 +8531,7 @@ static int vmFreePage(off_t page) {
 }
 
 /* Find N contiguous free pages storing the first page of the cluster in *first.
- * Returns REDIS_OK if it was able to find N contiguous pages, otherwise 
+ * Returns REDIS_OK if it was able to find N contiguous pages, otherwise
  * REDIS_ERR is returned.
  *
  * This function uses a simple algorithm: we try to allocate
@@ -8413,7 +8542,7 @@ static int vmFreePage(off_t page) {
  * we try to find less populated places doing a forward jump of
  * REDIS_VM_MAX_RANDOM_JUMP, then we start scanning again a few pages
  * without hurry, and then we jump again and so forth...
- * 
+ *
  * This function can be improved using a free list to avoid to guess
  * too much, since we could collect data about freed pages.
  *
@@ -9067,7 +9196,7 @@ static void *IOThreadEntryPoint(void *arg) {
         listDelNode(server.io_processing,ln);
         listAddNodeTail(server.io_processed,j);
         unlockThreadedIO();
-        
+
         /* Signal the main thread there is new stuff to process */
         assert(write(server.io_ready_pipe_write,"x",1) == 1);
     }
@@ -9145,7 +9274,7 @@ static void queueIOJob(iojob *j) {
 
 static int vmSwapObjectThreaded(robj *key, robj *val, redisDb *db) {
     iojob *j;
-    
+
     assert(key->storage == REDIS_VM_MEMORY);
     assert(key->refcount == 1);
 
@@ -9189,7 +9318,7 @@ static int waitForSwappedKey(redisClient *c, robj *key) {
         vmCancelThreadedIOJob(o);
         return 0;
     }
-    
+
     /* OK: the key is either swapped, or being loaded just now. */
 
     /* Add the key to the list of keys this client is waiting for.
@@ -9902,7 +10031,7 @@ static void *getMcontextEip(ucontext_t *uc) {
     return (void*) uc->uc_mcontext->__ss.__rip;
   #else
     return (void*) uc->uc_mcontext->__ss.__eip;
-  #endif 
+  #endif
 #elif defined(__i386__) || defined(__X86_64__) || defined(__x86_64__)
     return (void*) uc->uc_mcontext.gregs[REG_EIP]; /* Linux 32/64 bit */
 #elif defined(__ia64__) /* Linux IA64 */
@@ -9927,7 +10056,7 @@ static void segvHandler(int sig, siginfo_t *info, void *secret) {
     redisLog(REDIS_WARNING, "%s",infostring);
     /* It's not safe to sdsfree() the returned string under memory
      * corruption conditions. Let it leak as we are going to abort */
-    
+
     trace_size = backtrace(trace, 100);
     /* overwrite sigaction with caller's address */
     if (getMcontextEip(uc) != NULL) {
