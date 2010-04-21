@@ -25,6 +25,7 @@
 #
 # vwait forever
 
+package require Tcl 8.5
 package provide redis 0.1
 
 namespace eval redis {}
@@ -46,7 +47,7 @@ foreach redis_bulk_cmd {
 
 # Flag commands requiring last argument as a bulk write operation
 foreach redis_multibulk_cmd {
-    mset msetnx hset hmset hmget
+    mset msetnx hset hsetnx hmset hmget
 } {
     set ::redis::multibulkarg($redis_multibulk_cmd) {}
 }

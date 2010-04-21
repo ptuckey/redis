@@ -23,6 +23,12 @@ proc test {name code okpattern} {
         puts "!! ERROR expected\n'$okpattern'\nbut got\n'$retval'"
         incr ::failed
     }
+    if {$::traceleaks} {
+        if {![string match {*0 leaks*} [exec leaks redis-server]]} {
+            puts "--------- Test $::testnum LEAKED! --------"
+            exit 1
+        }
+    }
 }
 
 proc randstring {min max {type binary}} {
@@ -226,8 +232,8 @@ proc datasetDigest r {
     return $digest
 }
 
-proc main {server port} {
-    set r [redis $server $port]
+proc main {} {
+    set r [redis $::host $::port]
     $r select 9
     set err ""
     set res ""
@@ -929,6 +935,15 @@ proc main {server port} {
         lsort [array names myset]
     } {a b c}
 
+    test {SORT ALPHA against integer encoded strings} {
+        $r del mylist
+        $r lpush mylist 2
+        $r lpush mylist 1
+        $r lpush mylist 3
+        $r lpush mylist 10
+        $r sort mylist alpha
+    } {1 10 2 3}
+
     test {Create a random list and a random set} {
         set tosort {}
         array set seenrand {}
@@ -947,6 +962,7 @@ proc main {server port} {
             $r lpush tosort $i
             $r sadd tosort-set $i
             $r set weight_$i $rint
+            $r hset wobj_$i weight $rint
             lappend tosort [list $i $rint]
         }
         set sorted [lsort -index 1 -real $tosort]
@@ -961,12 +977,43 @@ proc main {server port} {
         $r sort tosort {BY weight_*}
     } $res
 
-    test {the same SORT with BY, but against the newly created set} {
+    test {SORT with BY (hash field) against the newly created list} {
+        $r sort tosort {BY wobj_*->weight}
+    } $res
+
+    test {SORT with GET (key+hash) with sanity check of each element (list)} {
+        set err {}
+        set l1 [$r sort tosort GET # GET weight_*]
+        set l2 [$r sort tosort GET # GET wobj_*->weight]
+        foreach {id1 w1} $l1 {id2 w2} $l2 {
+            set realweight [$r get weight_$id1]
+            if {$id1 != $id2} {
+                set err "ID mismatch $id1 != $id2"
+                break
+            }
+            if {$realweight != $w1 || $realweight != $w2} {
+                set err "Weights mismatch! w1: $w1 w2: $w2 real: $realweight"
+                break
+            }
+        }
+        set _ $err
+    } {}
+
+    test {SORT with BY, but against the newly created set} {
         $r sort tosort-set {BY weight_*}
+    } $res
+
+    test {SORT with BY (hash field), but against the newly created set} {
+        $r sort tosort-set {BY wobj_*->weight}
     } $res
 
     test {SORT with BY and STORE against the newly created list} {
         $r sort tosort {BY weight_*} store sort-res
+        $r lrange sort-res 0 -1
+    } $res
+
+    test {SORT with BY (hash field) and STORE against the newly created list} {
+        $r sort tosort {BY wobj_*->weight} store sort-res
         $r lrange sort-res 0 -1
     } $res
 
@@ -982,6 +1029,17 @@ proc main {server port} {
         set start [clock clicks -milliseconds]
         for {set i 0} {$i < 100} {incr i} {
             set sorted [$r sort tosort {BY weight_* LIMIT 0 10}]
+        }
+        set elapsed [expr [clock clicks -milliseconds]-$start]
+        puts -nonewline "\n  Average time to sort: [expr double($elapsed)/100] milliseconds "
+        flush stdout
+        format {}
+    } {}
+
+    test {SORT speed, as above but against hash field} {
+        set start [clock clicks -milliseconds]
+        for {set i 0} {$i < 100} {incr i} {
+            set sorted [$r sort tosort {BY wobj_*->weight LIMIT 0 10}]
         }
         set elapsed [expr [clock clicks -milliseconds]-$start]
         puts -nonewline "\n  Average time to sort: [expr double($elapsed)/100] milliseconds "
@@ -1646,6 +1704,30 @@ proc main {server port} {
         set _ $rv
     } {0 newval1 1 0 newval2 1 1 1}
 
+    test {HSETNX target key missing - small hash} {
+        $r hsetnx smallhash __123123123__ foo
+        $r hget smallhash __123123123__
+    } {foo}
+
+    test {HSETNX target key exists - small hash} {
+        $r hsetnx smallhash __123123123__ bar
+        set result [$r hget smallhash __123123123__]
+        $r hdel smallhash __123123123__
+        set _ $result
+    } {foo}
+
+    test {HSETNX target key missing - big hash} {
+        $r hsetnx bighash __123123123__ foo
+        $r hget bighash __123123123__
+    } {foo}
+
+    test {HSETNX target key exists - big hash} {
+        $r hsetnx bighash __123123123__ bar
+        set result [$r hget bighash __123123123__]
+        $r hdel bighash __123123123__
+        set _ $result
+    } {foo}
+
     test {HMSET wrong number of args} {
         catch {$r hmset smallhash key1 val1 key2} err
         format $err
@@ -2008,7 +2090,7 @@ proc main {server port} {
     } {1 1}
 
     test {PIPELINING stresser (also a regression for the old epoll bug)} {
-        set fd2 [socket 127.0.0.1 6379]
+        set fd2 [socket $::host $::port]
         fconfigure $fd2 -encoding binary -translation binary
         puts -nonewline $fd2 "SELECT 9\r\n"
         flush $fd2
@@ -2113,7 +2195,7 @@ proc main {server port} {
 }
 
 proc stress {} {
-    set r [redis]
+    set r [redis $::host $::port]
     $r select 9
     $r flushdb
     while 1 {
@@ -2150,6 +2232,7 @@ proc stress {} {
 set ::host 127.0.0.1
 set ::port 6379
 set ::stress 0
+set ::traceleaks 0
 set ::flush 0
 set ::first 0
 set ::last 1000000
@@ -2165,8 +2248,10 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
     } elseif {$opt eq {-p} && !$lastarg} {
         set ::port $arg
         incr j
-    } elseif {$opt eq {-stress}} {
+    } elseif {$opt eq {--stress}} {
         set ::stress 1
+    } elseif {$opt eq {--trace-leaks}} {
+        set ::traceleaks 1
     } elseif {$opt eq {--flush}} {
         set ::flush 1
     } elseif {$opt eq {--first} && !$lastarg} {
@@ -2182,7 +2267,7 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
 }
 
 # Before to run the test check if DB 9 and DB 10 are empty
-set r [redis]
+set r [redis $::host $::port]
 
 if {$::flush} {
     $r flushall
@@ -2201,8 +2286,9 @@ unset r
 unset db9size
 unset db10size
 
+puts "Testing Redis, host $::host, port $::port"
 if {$::stress} {
     stress
 } else {
-    main $::host $::port
+    main
 }
