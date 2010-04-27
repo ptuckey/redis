@@ -34,6 +34,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "anet.h"
 #include "sds.h"
@@ -67,6 +68,7 @@ static struct redisCommand cmdTable[] = {
     {"get",2,REDIS_CMD_INLINE},
     {"set",3,REDIS_CMD_BULK},
     {"setnx",3,REDIS_CMD_BULK},
+    {"setex",4,REDIS_CMD_BULK},
     {"append",3,REDIS_CMD_BULK},
     {"substr",4,REDIS_CMD_INLINE},
     {"del",-2,REDIS_CMD_INLINE},
@@ -224,6 +226,31 @@ static int cliReadSingleLineReply(int fd, int quiet) {
     return 0;
 }
 
+static void printStringRepr(char *s, int len) {
+    printf("\"");
+    while(len--) {
+        switch(*s) {
+        case '\\':
+        case '"':
+            printf("\\%c",*s);
+            break;
+        case '\n': printf("\\n"); break;
+        case '\r': printf("\\r"); break;
+        case '\t': printf("\\t"); break;
+        case '\a': printf("\\a"); break;
+        case '\b': printf("\\b"); break;
+        default:
+            if (isprint(*s))
+                printf("%c",*s);
+            else
+                printf("\\x%02x",(unsigned char)*s);
+            break;
+        }
+        s++;
+    }
+    printf("\"\n");
+}
+
 static int cliReadBulkReply(int fd) {
     sds replylen = cliReadLine(fd);
     char *reply, crlf[2];
@@ -239,12 +266,16 @@ static int cliReadBulkReply(int fd) {
     reply = zmalloc(bulklen);
     anetRead(fd,reply,bulklen);
     anetRead(fd,crlf,2);
-    if (bulklen && fwrite(reply,bulklen,1,stdout) == 0) {
-        zfree(reply);
-        return 1;
+    if (!isatty(fileno(stdout))) {
+        if (bulklen && fwrite(reply,bulklen,1,stdout) == 0) {
+            zfree(reply);
+            return 1;
+        }
+    } else {
+        /* If you are producing output for the standard output we want
+         * a more interesting output with quoted characters and so forth */
+        printStringRepr(reply,bulklen);
     }
-    if (isatty(fileno(stdout)) && reply[bulklen-1] != '\n')
-        printf("\n");
     zfree(reply);
     return 0;
 }
@@ -459,32 +490,95 @@ static char **convertToSds(int count, char** args) {
   return sds;
 }
 
+static char **splitArguments(char *line, int *argc) {
+    char *p = line;
+    char *current = NULL;
+    char **vector = NULL;
+
+    *argc = 0;
+    while(1) {
+        /* skip blanks */
+        while(*p && isspace(*p)) p++;
+        if (*p) {
+            /* get a token */
+            int inq=0; /* set to 1 if we are in "quotes" */
+            int done = 0;
+
+            if (current == NULL) current = sdsempty();
+            while(!done) {
+                if (inq) {
+                    if (*p == '\\' && *(p+1)) {
+                        char c;
+
+                        p++;
+                        switch(*p) {
+                        case 'n': c = '\n'; break;
+                        case 'r': c = '\r'; break;
+                        case 't': c = '\t'; break;
+                        case 'b': c = '\b'; break;
+                        case 'a': c = '\a'; break;
+                        default: c = *p; break;
+                        }
+                        current = sdscatlen(current,&c,1);
+                    } else if (*p == '"') {
+                        done = 1;
+                    } else {
+                        current = sdscatlen(current,p,1);
+                    }
+                } else {
+                    switch(*p) {
+                    case ' ':
+                    case '\n':
+                    case '\r':
+                    case '\t':
+                    case '\0':
+                        done=1;
+                        break;
+                    case '"':
+                        inq=1;
+                        break;
+                    default:
+                        current = sdscatlen(current,p,1);
+                        break;
+                    }
+                }
+                if (*p) p++;
+            }
+            /* add the token to the vector */
+            vector = zrealloc(vector,((*argc)+1)*sizeof(char*));
+            vector[*argc] = current;
+            (*argc)++;
+            current = NULL;
+        } else {
+            return vector;
+        }
+    }
+}
+
+#define LINE_BUFLEN 4096
 static void repl() {
-    int size = 4096, max = size >> 1, argc;
-    char *line;
-    char **ap, *args[max];
+    int argc, j;
+    char *line, **argv;
 
     while((line = linenoise("redis> ")) != NULL) {
         if (line[0] != '\0') {
-          linenoiseHistoryAdd(line);
-          argc = 0;
-
-          for (ap = args; (*ap = strsep(&line, " \t")) != NULL;) {
-              if (**ap != '\0') {
-                  if (argc >= max) break;
-                  if (strcasecmp(*ap,"quit") == 0 || strcasecmp(*ap,"exit") == 0)
-                      exit(0);
-                  ap++;
-                  argc++;
-              }
-          }
-
-          cliSendCommand(argc, convertToSds(argc, args), 1);
+            argv = splitArguments(line,&argc);
+            linenoiseHistoryAdd(line);
+            if (argc > 0) {
+                if (strcasecmp(argv[0],"quit") == 0 ||
+                    strcasecmp(argv[0],"exit") == 0)
+                        exit(0);
+                else
+                    cliSendCommand(argc, argv, 1);
+            }
+            /* Free the argument vector */
+            for (j = 0; j < argc; j++)
+                sdsfree(argv[j]);
+            free(argv);
         }
-
+        /* linenoise() returns malloc-ed lines like readline() */
         free(line);
     }
-
     exit(0);
 }
 
