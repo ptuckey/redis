@@ -37,8 +37,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#define __USE_POSIX199309
-#define __USE_UNIX98
 #include <signal.h>
 
 #ifdef HAVE_BACKTRACE
@@ -4124,7 +4122,7 @@ static void echoCommand(redisClient *c) {
 
 static void setGenericCommand(redisClient *c, int nx, robj *key, robj *val, robj *expire) {
     int retval;
-    long seconds;
+    long seconds = 0; /* initialized to avoid an harmness warning */
 
     if (expire) {
         if (getLongFromObjectOrReply(c, expire, &seconds, NULL) != REDIS_OK)
@@ -8165,7 +8163,9 @@ static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv
         (server.appendfsync == APPENDFSYNC_EVERYSEC &&
          now-server.lastfsync > 1))
     {
-        fsync(server.appendfd); /* Let's try to get this data on the disk */
+        /* aof_fsync is defined as fdatasync() for Linux in order to avoid
+         * flushing metadata. */
+        aof_fsync(server.appendfd); /* Let's try to get this data on the disk */
         server.lastfsync = now;
     }
 }
