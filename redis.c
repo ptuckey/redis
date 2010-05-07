@@ -413,6 +413,7 @@ struct redisServer {
     pid_t bgsavechildpid;
     pid_t bgrewritechildpid;
     sds bgrewritebuf; /* buffer taken by parent during oppend only rewrite */
+    sds aofbuf;       /* AOF buffer, written before entering the event loop */
     struct saveparam *saveparams;
     int saveparamslen;
     int usesyslog;
@@ -602,6 +603,7 @@ static robj *createStringObject(char *ptr, size_t len);
 static robj *dupStringObject(robj *o);
 static void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 static void replicationFeedMonitors(list *monitors, int dictid, robj **argv, int argc);
+static void flushAppendOnlyFile(void);
 static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc);
 static int syncWithMaster(void);
 static robj *tryObjectEncoding(robj *o);
@@ -1580,6 +1582,7 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
 static void beforeSleep(struct aeEventLoop *eventLoop) {
     REDIS_NOTUSED(eventLoop);
 
+    /* Awake clients that got all the swapped keys they requested */
     if (server.vm_enabled && listLength(server.io_ready_clients)) {
         listIter li;
         listNode *ln;
@@ -1604,6 +1607,8 @@ static void beforeSleep(struct aeEventLoop *eventLoop) {
                 processInputBuffer(c);
         }
     }
+    /* Write the AOF buffer on disk */
+    flushAppendOnlyFile();
 }
 
 static void createSharedObjects(void) {
@@ -1768,6 +1773,7 @@ static void initServer() {
     server.bgsavechildpid = -1;
     server.bgrewritechildpid = -1;
     server.bgrewritebuf = sdsempty();
+    server.aofbuf = sdsempty();
     server.lastsave = time(NULL);
     server.dirty = 0;
     server.stat_numcommands = 0;
@@ -3296,7 +3302,7 @@ static int getDoubleFromObject(robj *o, double *target) {
         } else if (o->encoding == REDIS_ENCODING_INT) {
             value = (long)o->ptr;
         } else {
-            redisAssert(1 != 1);
+            redisPanic("Unknown string encoding");
         }
     }
 
@@ -3333,7 +3339,7 @@ static int getLongLongFromObject(robj *o, long long *target) {
         } else if (o->encoding == REDIS_ENCODING_INT) {
             value = (long)o->ptr;
         } else {
-            redisAssert(1 != 1);
+            redisPanic("Unknown string encoding");
         }
     }
 
@@ -4554,7 +4560,6 @@ static void shutdownCommand(redisClient *c) {
                 unlink(server.pidfile);
             redisLog(REDIS_WARNING,"%zu bytes used at exit",zmalloc_used_memory());
             redisLog(REDIS_WARNING,"Server exit now, bye bye...");
-            if (server.vm_enabled) unlink(server.vm_swap_file);
             exit(0);
         } else {
             /* Ooops.. error saving! The best we can do is to continue
@@ -6537,12 +6542,11 @@ static void hincrbyCommand(redisClient *c) {
     if (getLongLongFromObjectOrReply(c,c->argv[3],&incr,NULL) != REDIS_OK) return;
     if ((o = hashLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
     if ((current = hashGet(o,c->argv[2])) != NULL) {
-        if (current->encoding == REDIS_ENCODING_RAW)
-            value = strtoll(current->ptr,NULL,10);
-        else if (current->encoding == REDIS_ENCODING_INT)
-            value = (long)current->ptr;
-        else
-            redisAssert(1 != 1);
+        if (getLongLongFromObjectOrReply(c,current,&value,
+            "hash value is not an integer") != REDIS_OK) {
+            decrRefCount(current);
+            return;
+        }
         decrRefCount(current);
     } else {
         value = 0;
@@ -8083,11 +8087,55 @@ static void freeMemoryIfNeeded(void) {
 
 /* ============================== Append Only file ========================== */
 
+/* Write the append only file buffer on disk.
+ *
+ * Since we are required to write the AOF before replying to the client,
+ * and the only way the client socket can get a write is entering when the
+ * the event loop, we accumulate all the AOF writes in a memory
+ * buffer and write it on disk using this function just before entering
+ * the event loop again. */
+static void flushAppendOnlyFile(void) {
+    time_t now;
+    ssize_t nwritten;
+
+    if (sdslen(server.aofbuf) == 0) return;
+
+    /* We want to perform a single write. This should be guaranteed atomic
+     * at least if the filesystem we are writing is a real physical one.
+     * While this will save us against the server being killed I don't think
+     * there is much to do about the whole server stopping for power problems
+     * or alike */
+     nwritten = write(server.appendfd,server.aofbuf,sdslen(server.aofbuf));
+     if (nwritten != (signed)sdslen(server.aofbuf)) {
+        /* Ooops, we are in troubles. The best thing to do for now is
+         * aborting instead of giving the illusion that everything is
+         * working as expected. */
+         if (nwritten == -1) {
+            redisLog(REDIS_WARNING,"Exiting on error writing to the append-only file: %s",strerror(errno));
+         } else {
+            redisLog(REDIS_WARNING,"Exiting on short write while writing to the append-only file: %s",strerror(errno));
+         }
+         exit(1);
+    }
+    sdsfree(server.aofbuf);
+    server.aofbuf = sdsempty();
+
+    /* Fsync if needed */
+    now = time(NULL);
+    if (server.appendfsync == APPENDFSYNC_ALWAYS ||
+        (server.appendfsync == APPENDFSYNC_EVERYSEC &&
+         now-server.lastfsync > 1))
+    {
+        /* aof_fsync is defined as fdatasync() for Linux in order to avoid
+         * flushing metadata. */
+        aof_fsync(server.appendfd); /* Let's try to get this data on the disk */
+        server.lastfsync = now;
+    }
+}
+
 static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
     int j;
-    ssize_t nwritten;
-    time_t now;
     robj *tmpargv[3];
 
     /* The DB this command was targetting is not the same as the last command
@@ -8133,23 +8181,11 @@ static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv
             decrRefCount(argv[j]);
     }
 
-    /* We want to perform a single write. This should be guaranteed atomic
-     * at least if the filesystem we are writing is a real physical one.
-     * While this will save us against the server being killed I don't think
-     * there is much to do about the whole server stopping for power problems
-     * or alike */
-     nwritten = write(server.appendfd,buf,sdslen(buf));
-     if (nwritten != (signed)sdslen(buf)) {
-        /* Ooops, we are in troubles. The best thing to do for now is
-         * to simply exit instead to give the illusion that everything is
-         * working as expected. */
-         if (nwritten == -1) {
-            redisLog(REDIS_WARNING,"Exiting on error writing to the append-only file: %s",strerror(errno));
-         } else {
-            redisLog(REDIS_WARNING,"Exiting on short write while writing to the append-only file: %s",strerror(errno));
-         }
-         exit(1);
-    }
+    /* Append to the AOF buffer. This will be flushed on disk just before
+     * of re-entering the event loop, so before the client will get a
+     * positive reply about the operation performed. */
+    server.aofbuf = sdscatlen(server.aofbuf,buf,sdslen(buf));
+
     /* If a background append only file rewriting is in progress we want to
      * accumulate the differences between the child DB and the current one
      * in a buffer, so that when the child process will do its work we
@@ -8158,16 +8194,6 @@ static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv
         server.bgrewritebuf = sdscatlen(server.bgrewritebuf,buf,sdslen(buf));
 
     sdsfree(buf);
-    now = time(NULL);
-    if (server.appendfsync == APPENDFSYNC_ALWAYS ||
-        (server.appendfsync == APPENDFSYNC_EVERYSEC &&
-         now-server.lastfsync > 1))
-    {
-        /* aof_fsync is defined as fdatasync() for Linux in order to avoid
-         * flushing metadata. */
-        aof_fsync(server.appendfd); /* Let's try to get this data on the disk */
-        server.lastfsync = now;
-    }
 }
 
 /* In Redis commands are always executed in the context of a client, so in
@@ -8187,12 +8213,14 @@ static struct redisClient *createFakeClient(void) {
     c->reply = listCreate();
     listSetFreeMethod(c->reply,decrRefCount);
     listSetDupMethod(c->reply,dupClientReplyValue);
+    initClientMultiState(c);
     return c;
 }
 
 static void freeFakeClient(struct redisClient *c) {
     sdsfree(c->querybuf);
     listRelease(c->reply);
+    freeClientMultiState(c);
     zfree(c);
 }
 
@@ -8204,6 +8232,7 @@ int loadAppendOnlyFile(char *filename) {
     FILE *fp = fopen(filename,"r");
     struct redis_stat sb;
     unsigned long long loadedkeys = 0;
+    int appendonly = server.appendonly;
 
     if (redis_fstat(fileno(fp),&sb) != -1 && sb.st_size == 0)
         return REDIS_ERR;
@@ -8212,6 +8241,10 @@ int loadAppendOnlyFile(char *filename) {
         redisLog(REDIS_WARNING,"Fatal error: can't open the append log file for reading: %s",strerror(errno));
         exit(1);
     }
+
+    /* Temporarily disable AOF, to prevent EXEC from feeding a MULTI
+     * to the same file we're about to read. */
+    server.appendonly = 0;
 
     fakeClient = createFakeClient();
     while(1) {
@@ -8268,8 +8301,14 @@ int loadAppendOnlyFile(char *filename) {
             }
         }
     }
+
+    /* This point can only be reached when EOF is reached without errors.
+     * If the client is in the middle of a MULTI/EXEC, log error and quit. */
+    if (fakeClient->flags & REDIS_MULTI) goto readerr;
+
     fclose(fp);
     freeFakeClient(fakeClient);
+    server.appendonly = appendonly;
     return REDIS_OK;
 
 readerr:
@@ -8619,42 +8658,38 @@ static void aofRemoveTempFile(pid_t childpid) {
 
 /* =================== Virtual Memory - Blocking Side  ====================== */
 
-/* substitute the first occurrence of '%p' with the process pid in the
- * swap file name. */
-static void expandVmSwapFilename(void) {
-    char *p = strstr(server.vm_swap_file,"%p");
-    sds new;
-
-    if (!p) return;
-    new = sdsempty();
-    *p = '\0';
-    new = sdscat(new,server.vm_swap_file);
-    new = sdscatprintf(new,"%ld",(long) getpid());
-    new = sdscat(new,p+2);
-    zfree(server.vm_swap_file);
-    server.vm_swap_file = new;
-}
-
 static void vmInit(void) {
     off_t totsize;
     int pipefds[2];
     size_t stacksize;
+    struct flock fl;
 
     if (server.vm_max_threads != 0)
         zmalloc_enable_thread_safeness(); /* we need thread safe zmalloc() */
 
-    expandVmSwapFilename();
     redisLog(REDIS_NOTICE,"Using '%s' as swap file",server.vm_swap_file);
+    /* Try to open the old swap file, otherwise create it */
     if ((server.vm_fp = fopen(server.vm_swap_file,"r+b")) == NULL) {
         server.vm_fp = fopen(server.vm_swap_file,"w+b");
     }
     if (server.vm_fp == NULL) {
         redisLog(REDIS_WARNING,
-            "Impossible to open the swap file: %s. Exiting.",
+            "Can't open the swap file: %s. Exiting.",
             strerror(errno));
         exit(1);
     }
     server.vm_fd = fileno(server.vm_fp);
+    /* Lock the swap file for writing, this is useful in order to avoid
+     * another instance to use the same swap file for a config error. */
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = fl.l_len = 0;
+    if (fcntl(server.vm_fd,F_SETLK,&fl) == -1) {
+        redisLog(REDIS_WARNING,
+            "Can't lock the swap file at '%s': %s. Make sure it is not used by another Redis instance.", server.vm_swap_file, strerror(errno));
+        exit(1);
+    }
+    /* Initialize */
     server.vm_next_page = 0;
     server.vm_near_pages = 0;
     server.vm_stats_used_pages = 0;
@@ -10119,6 +10154,25 @@ static void debugCommand(redisClient *c) {
         } else {
             addReply(c,shared.err);
         }
+    } else if (!strcasecmp(c->argv[1]->ptr,"populate") && c->argc == 3) {
+        long keys, j;
+        robj *key, *val;
+        char buf[128];
+
+        if (getLongFromObjectOrReply(c, c->argv[2], &keys, NULL) != REDIS_OK)
+            return;
+        for (j = 0; j < keys; j++) {
+            snprintf(buf,sizeof(buf),"key:%lu",j);
+            key = createStringObject(buf,strlen(buf));
+            if (lookupKeyRead(c->db,key) != NULL) {
+                decrRefCount(key);
+                continue;
+            }
+            snprintf(buf,sizeof(buf),"value:%lu",j);
+            val = createStringObject(buf,strlen(buf));
+            dictAdd(c->db->dict,key,val);
+        }
+        addReply(c,shared.ok);
     } else {
         addReplySds(c,sdsnew(
             "-ERR Syntax error, try DEBUG [SEGFAULT|OBJECT <key>|SWAPIN <key>|SWAPOUT <key>|RELOAD]\r\n"));
