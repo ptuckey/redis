@@ -57,6 +57,7 @@
 #include <sys/resource.h>
 #include <sys/uio.h>
 #include <limits.h>
+#include <float.h>
 #include <math.h>
 #include <pthread.h>
 #include <syslog.h>
@@ -495,6 +496,7 @@ typedef struct pubsubPattern {
 } pubsubPattern;
 
 typedef void redisCommandProc(redisClient *c);
+typedef void redisVmPreloadProc(redisClient *c, struct redisCommand *cmd, int argc, robj **argv);
 struct redisCommand {
     char *name;
     redisCommandProc *proc;
@@ -503,7 +505,7 @@ struct redisCommand {
     /* Use a function to determine which keys need to be loaded
      * in the background prior to executing this command. Takes precedence
      * over vm_firstkey and others, ignored when NULL */
-    redisCommandProc *vm_preload_proc;
+    redisVmPreloadProc *vm_preload_proc;
     /* What keys should be loaded in background when calling this command? */
     int vm_firstkey; /* The first argument that's a key (0 = no keys) */
     int vm_lastkey;  /* THe last argument that's a key */
@@ -653,8 +655,9 @@ static robj *vmReadObjectFromSwap(off_t page, int type);
 static void waitEmptyIOJobsQueue(void);
 static void vmReopenSwapFile(void);
 static int vmFreePage(off_t page);
-static void zunionInterBlockClientOnSwappedKeys(redisClient *c);
-static int blockClientOnSwappedKeys(struct redisCommand *cmd, redisClient *c);
+static void zunionInterBlockClientOnSwappedKeys(redisClient *c, struct redisCommand *cmd, int argc, robj **argv);
+static void execBlockClientOnSwappedKeys(redisClient *c, struct redisCommand *cmd, int argc, robj **argv);
+static int blockClientOnSwappedKeys(redisClient *c, struct redisCommand *cmd);
 static int dontWaitForSwappedKey(redisClient *c, robj *key);
 static void handleClientsBlockedOnSwappedKey(redisDb *db, robj *key);
 static void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask);
@@ -872,7 +875,7 @@ static struct redisCommand cmdTable[] = {
     {"lastsave",lastsaveCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
     {"type",typeCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"multi",multiCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
-    {"exec",execCommand,1,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,0,0,0},
+    {"exec",execCommand,1,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,execBlockClientOnSwappedKeys,0,0,0},
     {"discard",discardCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
     {"sync",syncCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
     {"flushdb",flushdbCommand,1,REDIS_CMD_INLINE,NULL,0,0,0},
@@ -1987,6 +1990,9 @@ static void loadServerConfig(char *filename) {
             if ((server.appendonly = yesnotoi(argv[1])) == -1) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"appendfilename") && argc == 2) {
+            zfree(server.appendfilename);
+            server.appendfilename = zstrdup(argv[1]);
         } else if (!strcasecmp(argv[0],"appendfsync") && argc == 2) {
             if (!strcasecmp(argv[1],"no")) {
                 server.appendfsync = APPENDFSYNC_NO;
@@ -2492,7 +2498,7 @@ static int processCommand(redisClient *c) {
         addReply(c,shared.queued);
     } else {
         if (server.vm_enabled && server.vm_max_threads > 0 &&
-            blockClientOnSwappedKeys(cmd,c)) return 1;
+            blockClientOnSwappedKeys(c,cmd)) return 1;
         call(c,cmd);
     }
 
@@ -3453,22 +3459,12 @@ static int rdbSaveLen(FILE *fp, uint32_t len) {
     return 0;
 }
 
-/* String objects in the form "2391" "-100" without any space and with a
- * range of values that can fit in an 8, 16 or 32 bit signed value can be
- * encoded as integers to save space */
-static int rdbTryIntegerEncoding(char *s, size_t len, unsigned char *enc) {
-    long long value;
-    char *endptr, buf[32];
-
-    /* Check if it's possible to encode this value as a number */
-    value = strtoll(s, &endptr, 10);
-    if (endptr[0] != '\0') return 0;
-    ll2string(buf,32,value);
-
-    /* If the number converted back into a string is not identical
-     * then it's not possible to encode the string as integer */
-    if (strlen(buf) != len || memcmp(buf,s,len)) return 0;
-
+/* Encode 'value' as an integer if possible (if integer will fit the
+ * supported range). If the function sucessful encoded the integer
+ * then the (up to 5 bytes) encoded representation is written in the
+ * string pointed by 'enc' and the length is returned. Otherwise
+ * 0 is returned. */
+static int rdbEncodeInteger(long long value, unsigned char *enc) {
     /* Finally check if it fits in our ranges */
     if (value >= -(1<<7) && value <= (1<<7)-1) {
         enc[0] = (REDIS_RDB_ENCVAL<<6)|REDIS_RDB_ENC_INT8;
@@ -3489,6 +3485,25 @@ static int rdbTryIntegerEncoding(char *s, size_t len, unsigned char *enc) {
     } else {
         return 0;
     }
+}
+
+/* String objects in the form "2391" "-100" without any space and with a
+ * range of values that can fit in an 8, 16 or 32 bit signed value can be
+ * encoded as integers to save space */
+static int rdbTryIntegerEncoding(char *s, size_t len, unsigned char *enc) {
+    long long value;
+    char *endptr, buf[32];
+
+    /* Check if it's possible to encode this value as a number */
+    value = strtoll(s, &endptr, 10);
+    if (endptr[0] != '\0') return 0;
+    ll2string(buf,32,value);
+
+    /* If the number converted back into a string is not identical
+     * then it's not possible to encode the string as integer */
+    if (strlen(buf) != len || memcmp(buf,s,len)) return 0;
+
+    return rdbEncodeInteger(value,enc);
 }
 
 static int rdbSaveLzfStringObject(FILE *fp, unsigned char *s, size_t len) {
@@ -3554,6 +3569,21 @@ static int rdbSaveRawString(FILE *fp, unsigned char *s, size_t len) {
 static int rdbSaveStringObject(FILE *fp, robj *obj) {
     int retval;
 
+    /* Avoid to decode the object, then encode it again, if the
+     * object is alrady integer encoded. */
+    if (obj->encoding == REDIS_ENCODING_INT) {
+        long val = (long) obj->ptr;
+        unsigned char buf[5];
+        int enclen;
+
+        if ((enclen = rdbEncodeInteger(val,buf)) > 0) {
+            if (fwrite(buf,enclen,1,fp) == 0) return -1;
+            return 0;
+        }
+        /* otherwise... fall throught and continue with the usual
+         * code path. */
+    }
+
     /* Avoid incr/decr ref count business when possible.
      * This plays well with copy-on-write given that we are probably
      * in a child process (BGSAVE). Also this makes sure key objects
@@ -3588,7 +3618,23 @@ static int rdbSaveDoubleValue(FILE *fp, double val) {
         len = 1;
         buf[0] = (val < 0) ? 255 : 254;
     } else {
-        snprintf((char*)buf+1,sizeof(buf)-1,"%.17g",val);
+#if (DBL_MANT_DIG >= 52) && (LLONG_MAX == 0x7fffffffffffffffLL)
+        /* Check if the float is in a safe range to be casted into a
+         * long long. We are assuming that long long is 64 bit here.
+         * Also we are assuming that there are no implementations around where
+         * double has precision < 52 bit.
+         *
+         * Under this assumptions we test if a double is inside an interval
+         * where casting to long long is safe. Then using two castings we
+         * make sure the decimal part is zero. If all this is true we use
+         * integer printing function that is much faster. */
+        double min = -4503599627370495; /* (2^52)-1 */
+        double max = 4503599627370496; /* -(2^52) */
+        if (val > min && val < max && val == ((double)((long long)val)))
+            ll2string((char*)buf+1,sizeof(buf),(long long)val);
+        else
+#endif
+            snprintf((char*)buf+1,sizeof(buf)-1,"%.17g",val);
         buf[0] = strlen((char*)buf+1);
         len = buf[0]+1;
     }
@@ -4497,7 +4543,12 @@ static void delCommand(redisClient *c) {
 }
 
 static void existsCommand(redisClient *c) {
-    addReply(c,lookupKeyRead(c->db,c->argv[1]) ? shared.cone : shared.czero);
+    expireIfNeeded(c->db,c->argv[1]);
+    if (dictFind(c->db->dict,c->argv[1])) {
+        addReply(c, shared.cone);
+    } else {
+        addReply(c, shared.czero);
+    }
 }
 
 static void selectCommand(redisClient *c) {
@@ -8212,9 +8263,41 @@ static void flushAppendOnlyFile(void) {
     }
 }
 
+static sds catAppendOnlyGenericCommand(sds buf, int argc, robj **argv) {
+    int j;
+    buf = sdscatprintf(buf,"*%d\r\n",argc);
+    for (j = 0; j < argc; j++) {
+        robj *o = getDecodedObject(argv[j]);
+        buf = sdscatprintf(buf,"$%lu\r\n",(unsigned long)sdslen(o->ptr));
+        buf = sdscatlen(buf,o->ptr,sdslen(o->ptr));
+        buf = sdscatlen(buf,"\r\n",2);
+        decrRefCount(o);
+    }
+    return buf;
+}
+
+static sds catAppendOnlyExpireAtCommand(sds buf, robj *key, robj *seconds) {
+    int argc = 3;
+    long when;
+    robj *argv[3];
+
+    /* Make sure we can use strtol */
+    seconds = getDecodedObject(seconds);
+    when = time(NULL)+strtol(seconds->ptr,NULL,10);
+    decrRefCount(seconds);
+
+    argv[0] = createStringObject("EXPIREAT",8);
+    argv[1] = key;
+    argv[2] = createObject(REDIS_STRING,
+        sdscatprintf(sdsempty(),"%ld",when));
+    buf = catAppendOnlyGenericCommand(buf, argc, argv);
+    decrRefCount(argv[0]);
+    decrRefCount(argv[2]);
+    return buf;
+}
+
 static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
-    int j;
     robj *tmpargv[3];
 
     /* The DB this command was targetting is not the same as the last command
@@ -8228,36 +8311,19 @@ static void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv
         server.appendseldb = dictid;
     }
 
-    /* "Fix" the argv vector if the command is EXPIRE. We want to translate
-     * EXPIREs into EXPIREATs calls */
     if (cmd->proc == expireCommand) {
-        long when;
-
-        tmpargv[0] = createStringObject("EXPIREAT",8);
+        /* Translate EXPIRE into EXPIREAT */
+        buf = catAppendOnlyExpireAtCommand(buf,argv[1],argv[2]);
+    } else if (cmd->proc == setexCommand) {
+        /* Translate SETEX to SET and EXPIREAT */
+        tmpargv[0] = createStringObject("SET",3);
         tmpargv[1] = argv[1];
-        incrRefCount(argv[1]);
-        when = time(NULL)+strtol(argv[2]->ptr,NULL,10);
-        tmpargv[2] = createObject(REDIS_STRING,
-            sdscatprintf(sdsempty(),"%ld",when));
-        argv = tmpargv;
-    }
-
-    /* Append the actual command */
-    buf = sdscatprintf(buf,"*%d\r\n",argc);
-    for (j = 0; j < argc; j++) {
-        robj *o = argv[j];
-
-        o = getDecodedObject(o);
-        buf = sdscatprintf(buf,"$%lu\r\n",(unsigned long)sdslen(o->ptr));
-        buf = sdscatlen(buf,o->ptr,sdslen(o->ptr));
-        buf = sdscatlen(buf,"\r\n",2);
-        decrRefCount(o);
-    }
-
-    /* Free the objects from the modified argv for EXPIREAT */
-    if (cmd->proc == expireCommand) {
-        for (j = 0; j < 3; j++)
-            decrRefCount(argv[j]);
+        tmpargv[2] = argv[3];
+        buf = catAppendOnlyGenericCommand(buf,3,tmpargv);
+        decrRefCount(tmpargv[0]);
+        buf = catAppendOnlyExpireAtCommand(buf,argv[1],argv[2]);
+    } else {
+        buf = catAppendOnlyGenericCommand(buf,argc,argv);
     }
 
     /* Append to the AOF buffer. This will be flushed on disk just before
@@ -9694,12 +9760,56 @@ static int waitForSwappedKey(redisClient *c, robj *key) {
     return 1;
 }
 
-/* Preload keys needed for the ZUNION and ZINTER commands. */
-static void zunionInterBlockClientOnSwappedKeys(redisClient *c) {
+/* Preload keys for any command with first, last and step values for
+ * the command keys prototype, as defined in the command table. */
+static void waitForMultipleSwappedKeys(redisClient *c, struct redisCommand *cmd, int argc, robj **argv) {
+    int j, last;
+    if (cmd->vm_firstkey == 0) return;
+    last = cmd->vm_lastkey;
+    if (last < 0) last = argc+last;
+    for (j = cmd->vm_firstkey; j <= last; j += cmd->vm_keystep) {
+        redisAssert(j < argc);
+        waitForSwappedKey(c,argv[j]);
+    }
+}
+
+/* Preload keys needed for the ZUNION and ZINTER commands.
+ * Note that the number of keys to preload is user-defined, so we need to
+ * apply a sanity check against argc. */
+static void zunionInterBlockClientOnSwappedKeys(redisClient *c, struct redisCommand *cmd, int argc, robj **argv) {
     int i, num;
-    num = atoi(c->argv[2]->ptr);
+    REDIS_NOTUSED(cmd);
+
+    num = atoi(argv[2]->ptr);
+    if (num > (argc-3)) return;
     for (i = 0; i < num; i++) {
-        waitForSwappedKey(c,c->argv[3+i]);
+        waitForSwappedKey(c,argv[3+i]);
+    }
+}
+
+/* Preload keys needed to execute the entire MULTI/EXEC block.
+ *
+ * This function is called by blockClientOnSwappedKeys when EXEC is issued,
+ * and will block the client when any command requires a swapped out value. */
+static void execBlockClientOnSwappedKeys(redisClient *c, struct redisCommand *cmd, int argc, robj **argv) {
+    int i, margc;
+    struct redisCommand *mcmd;
+    robj **margv;
+    REDIS_NOTUSED(cmd);
+    REDIS_NOTUSED(argc);
+    REDIS_NOTUSED(argv);
+
+    if (!(c->flags & REDIS_MULTI)) return;
+    for (i = 0; i < c->mstate.count; i++) {
+        mcmd = c->mstate.commands[i].cmd;
+        margc = c->mstate.commands[i].argc;
+        margv = c->mstate.commands[i].argv;
+
+        if (mcmd->vm_preload_proc != NULL) {
+            mcmd->vm_preload_proc(c,mcmd,margc,margv);
+        } else {
+            waitForMultipleSwappedKeys(c,mcmd,margc,margv);
+        }
     }
 }
 
@@ -9713,17 +9823,11 @@ static void zunionInterBlockClientOnSwappedKeys(redisClient *c) {
  *
  * Return 1 if the client is marked as blocked, 0 if the client can
  * continue as the keys it is going to access appear to be in memory. */
-static int blockClientOnSwappedKeys(struct redisCommand *cmd, redisClient *c) {
-    int j, last;
-
+static int blockClientOnSwappedKeys(redisClient *c, struct redisCommand *cmd) {
     if (cmd->vm_preload_proc != NULL) {
-        cmd->vm_preload_proc(c);
+        cmd->vm_preload_proc(c,cmd,c->argc,c->argv);
     } else {
-        if (cmd->vm_firstkey == 0) return 0;
-        last = cmd->vm_lastkey;
-        if (last < 0) last = c->argc+last;
-        for (j = cmd->vm_firstkey; j <= last; j += cmd->vm_keystep)
-            waitForSwappedKey(c,c->argv[j]);
+        waitForMultipleSwappedKeys(c,cmd,c->argc,c->argv);
     }
 
     /* If the client was blocked for at least one key, mark it as blocked. */
