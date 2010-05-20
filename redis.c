@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.12"
+#define REDIS_VERSION "1.3.13"
 
 #include "fmacros.h"
 #include "config.h"
@@ -409,6 +409,7 @@ struct redisServer {
     int daemonize;
     int appendonly;
     int appendfsync;
+    int shutdown_asap;
     time_t lastfsync;
     int appendfd;
     int appendseldb;
@@ -676,6 +677,7 @@ static int equalStringObjects(robj *a, robj *b);
 static void usage();
 static int rewriteAppendOnlyFileBackground(void);
 static int vmSwapObjectBlocking(robj *key, robj *val);
+static int prepareForShutdown();
 
 static void authCommand(redisClient *c);
 static void pingCommand(redisClient *c);
@@ -1472,6 +1474,13 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
      * To access a global var is faster than calling time(NULL) */
     server.unixtime = time(NULL);
 
+    /* We received a SIGTERM, shutting down here in a safe way, as it is
+     * not ok doing so inside the signal handler. */
+    if (server.shutdown_asap) {
+        if (prepareForShutdown() == REDIS_OK) exit(0);
+        redisLog(REDIS_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
+    }
+
     /* Show some info about non-empty databases */
     for (j = 0; j < server.dbnum; j++) {
         long long size, used, vkeys;
@@ -1741,6 +1750,7 @@ static void initServerConfig() {
     server.vm_blocked_clients = 0;
     server.hash_max_zipmap_entries = REDIS_HASH_MAX_ZIPMAP_ENTRIES;
     server.hash_max_zipmap_value = REDIS_HASH_MAX_ZIPMAP_VALUE;
+    server.shutdown_asap = 0;
 
     resetServerSaveParams();
 
@@ -2992,8 +3002,8 @@ static robj *createStringObjectFromLongLong(long long value) {
         incrRefCount(shared.integers[value]);
         o = shared.integers[value];
     } else {
-        o = createObject(REDIS_STRING, NULL);
         if (value >= LONG_MIN && value <= LONG_MAX) {
+            o = createObject(REDIS_STRING, NULL);
             o->encoding = REDIS_ENCODING_INT;
             o->ptr = (void*)((long)value);
         } else {
@@ -4224,6 +4234,41 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     return REDIS_ERR; /* Just to avoid warning */
 }
 
+/*================================== Shutdown =============================== */
+static int prepareForShutdown() {
+    redisLog(REDIS_WARNING,"User requested shutdown, saving DB...");
+    /* Kill the saving child if there is a background saving in progress.
+       We want to avoid race conditions, for instance our saving child may
+       overwrite the synchronous saving did by SHUTDOWN. */
+    if (server.bgsavechildpid != -1) {
+        redisLog(REDIS_WARNING,"There is a live saving child. Killing it!");
+        kill(server.bgsavechildpid,SIGKILL);
+        rdbRemoveTempFile(server.bgsavechildpid);
+    }
+    if (server.appendonly) {
+        /* Append only file: fsync() the AOF and exit */
+        fsync(server.appendfd);
+        if (server.vm_enabled) unlink(server.vm_swap_file);
+    } else {
+        /* Snapshotting. Perform a SYNC SAVE and exit */
+        if (rdbSave(server.dbfilename) == REDIS_OK) {
+            if (server.daemonize)
+                unlink(server.pidfile);
+            redisLog(REDIS_WARNING,"%zu bytes used at exit",zmalloc_used_memory());
+        } else {
+            /* Ooops.. error saving! The best we can do is to continue
+             * operating. Note that if there was a background saving process,
+             * in the next cron() Redis will be notified that the background
+             * saving aborted, handling special stuff like slaves pending for
+             * synchronization... */
+            redisLog(REDIS_WARNING,"Error trying to save the DB, can't exit");
+            return REDIS_ERR;
+        }
+    }
+    redisLog(REDIS_WARNING,"Server exit now, bye bye...");
+    return REDIS_OK;
+}
+
 /*================================== Commands =============================== */
 
 static void authCommand(redisClient *c) {
@@ -4663,39 +4708,9 @@ static void bgsaveCommand(redisClient *c) {
 }
 
 static void shutdownCommand(redisClient *c) {
-    redisLog(REDIS_WARNING,"User requested shutdown, saving DB...");
-    /* Kill the saving child if there is a background saving in progress.
-       We want to avoid race conditions, for instance our saving child may
-       overwrite the synchronous saving did by SHUTDOWN. */
-    if (server.bgsavechildpid != -1) {
-        redisLog(REDIS_WARNING,"There is a live saving child. Killing it!");
-        kill(server.bgsavechildpid,SIGKILL);
-        rdbRemoveTempFile(server.bgsavechildpid);
-    }
-    if (server.appendonly) {
-        /* Append only file: fsync() the AOF and exit */
-        fsync(server.appendfd);
-        if (server.vm_enabled) unlink(server.vm_swap_file);
+    if (prepareForShutdown() == REDIS_OK)
         exit(0);
-    } else {
-        /* Snapshotting. Perform a SYNC SAVE and exit */
-        if (rdbSave(server.dbfilename) == REDIS_OK) {
-            if (server.daemonize)
-                unlink(server.pidfile);
-            redisLog(REDIS_WARNING,"%zu bytes used at exit",zmalloc_used_memory());
-            redisLog(REDIS_WARNING,"Server exit now, bye bye...");
-            exit(0);
-        } else {
-            /* Ooops.. error saving! The best we can do is to continue
-             * operating. Note that if there was a background saving process,
-             * in the next cron() Redis will be notified that the background
-             * saving aborted, handling special stuff like slaves pending for
-             * synchronization... */
-            redisLog(REDIS_WARNING,"Error trying to save the DB, can't exit");
-            addReplySds(c,
-                sdsnew("-ERR can't quit, problems saving the DB\r\n"));
-        }
-    }
+    addReplySds(c, sdsnew("-ERR Errors trying to SHUTDOWN. Check logs.\r\n"));
 }
 
 static void renameGenericCommand(redisClient *c, int nx) {
@@ -10492,18 +10507,23 @@ static void computeDatasetDigest(unsigned char *final) {
 
         /* Iterate this DB writing every entry */
         while((de = dictNext(di)) != NULL) {
-            robj *key, *o;
+            robj *key, *o, *kcopy;
             time_t expiretime;
 
             memset(digest,0,20); /* This key-val digest */
             key = dictGetEntryKey(de);
-            mixObjectDigest(digest,key);
-            if (!server.vm_enabled || key->storage == REDIS_VM_MEMORY ||
-                key->storage == REDIS_VM_SWAPPING) {
+
+            if (!server.vm_enabled) {
+                mixObjectDigest(digest,key);
                 o = dictGetEntryVal(de);
-                incrRefCount(o);
             } else {
-                o = vmPreviewObject(key);
+                /* Don't work with the key directly as when VM is active
+                 * this is unsafe: TODO: fix decrRefCount to check if the
+                 * count really reached 0 to avoid this mess */
+                kcopy = dupStringObject(key);
+                mixObjectDigest(digest,kcopy);
+                o = lookupKeyRead(db,kcopy);
+                decrRefCount(kcopy);
             }
             aux = htonl(o->type);
             mixDigest(digest,&aux,sizeof(aux));
@@ -10572,7 +10592,6 @@ static void computeDatasetDigest(unsigned char *final) {
             } else {
                 redisPanic("Unknown object type");
             }
-            decrRefCount(o);
             /* If the key has an expire, add it to the mix */
             if (expiretime != -1) xorDigest(digest,"!!expire!!",10);
             /* We can finally xor the key-val digest to the final digest */
@@ -10887,6 +10906,13 @@ static void segvHandler(int sig, siginfo_t *info, void *secret) {
     _exit(0);
 }
 
+static void sigtermHandler(int sig) {
+    REDIS_NOTUSED(sig);
+
+    redisLog(REDIS_WARNING,"SIGTERM received, scheduling shutting down...");
+    server.shutdown_asap = 1;
+}
+
 static void setupSigSegvAction(void) {
     struct sigaction act;
 
@@ -10900,6 +10926,10 @@ static void setupSigSegvAction(void) {
     sigaction (SIGFPE, &act, NULL);
     sigaction (SIGILL, &act, NULL);
     sigaction (SIGBUS, &act, NULL);
+
+    act.sa_flags = SA_NODEFER | SA_ONSTACK | SA_RESETHAND;
+    act.sa_handler = sigtermHandler;
+    sigaction (SIGTERM, &act, NULL);
     return;
 }
 
