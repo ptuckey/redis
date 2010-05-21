@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.13"
+#define REDIS_VERSION "2.1.0"
 
 #include "fmacros.h"
 #include "config.h"
@@ -5487,8 +5487,10 @@ static zskiplistNode *zslCreateNode(int level, double score, robj *obj) {
     zskiplistNode *zn = zmalloc(sizeof(*zn));
 
     zn->forward = zmalloc(sizeof(zskiplistNode*) * level);
-    if (level > 0)
+    if (level > 1)
         zn->span = zmalloc(sizeof(unsigned int) * (level - 1));
+    else
+        zn->span = NULL;
     zn->score = score;
     zn->obj = obj;
     return zn;
