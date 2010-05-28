@@ -7,3 +7,6 @@ unexport CFLAGS
 
 override_dh_auto_test:
 	# Testsuite requires working TCP/IP and a non-interactive mode
+
+override_dh_installinit:
+	dh_installinit -r
