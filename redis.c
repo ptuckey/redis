@@ -5809,6 +5809,11 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
     zset *zs;
     double *score;
 
+    if (isnan(scoreval)) {
+        addReplySds(c,sdsnew("-ERR provide score is Not A Number (nan)\r\n"));
+        return;
+    }
+
     zsetobj = lookupKeyWrite(c->db,key);
     if (zsetobj == NULL) {
         zsetobj = createZsetObject();
@@ -5836,6 +5841,15 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
             *score = *oldscore + scoreval;
         } else {
             *score = scoreval;
+        }
+        if (isnan(*score)) {
+            addReplySds(c,
+                sdsnew("-ERR resulting score is Not A Number (nan)\r\n"));
+            zfree(score);
+            /* Note that we don't need to check if the zset may be empty and
+             * should be removed here, as we can only obtain Nan as score if
+             * there was already an element in the sorted set. */
+            return;
         }
     } else {
         *score = scoreval;
@@ -10981,7 +10995,8 @@ static void daemonize(void) {
 }
 
 static void version() {
-    printf("Redis server version %s\n", REDIS_VERSION);
+    printf("Redis server version %s (%s:%d)\n", REDIS_VERSION,
+        REDIS_GIT_SHA1, atoi(REDIS_GIT_DIRTY) > 0);
     exit(0);
 }
 
