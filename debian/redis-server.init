@@ -18,9 +18,12 @@ DAEMON_ARGS=/etc/redis/redis.conf
 NAME=redis-server
 DESC=redis-server
 PIDFILE=/var/run/redis.pid
+ULIMIT_NOFILE=
 
 test -x $DAEMON || exit 0
 test -x $DAEMONBOOTSTRAP || exit 0
+
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
 
 set -e
 
@@ -29,6 +32,7 @@ case "$1" in
 	echo -n "Starting $DESC: "
 	touch $PIDFILE
 	chown redis:redis $PIDFILE
+	test -n "$ULIMIT_NOFILE" && ulimit -n "$ULIMIT_NOFILE"
 	if start-stop-daemon --start --quiet --umask 007 --pidfile $PIDFILE --chuid redis:redis --exec $DAEMON -- $DAEMON_ARGS
 	then
 		echo "$NAME."
