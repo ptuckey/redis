@@ -27,9 +27,26 @@ test -x $DAEMONBOOTSTRAP || exit 0
 
 set -e
 
+#
+# Function that returns 0 if process is running, 1 if not
+#
+is_running()
+{
+	if [ -f $PIDFILE ]; then
+		if ps -p `cat $PIDFILE` &> /dev/null; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
 case "$1" in
   start)
 	echo -n "Starting $DESC: "
+	if is_running; then
+		echo "$DESC is already running."
+		exit 0	
+	fi
 	touch $PIDFILE
 	chown redis:redis $PIDFILE
 	test -n "$ULIMIT_NOFILE" && ulimit -n "$ULIMIT_NOFILE"
