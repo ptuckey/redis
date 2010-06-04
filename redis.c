@@ -7993,6 +7993,7 @@ static void discardCommand(redisClient *c) {
     freeClientMultiState(c);
     initClientMultiState(c);
     c->flags &= (~REDIS_MULTI);
+    unwatchAllKeys(c);
     addReply(c,shared.ok);
 }
 
