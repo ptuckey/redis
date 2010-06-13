@@ -304,7 +304,7 @@ typedef struct redisObject {
     unsigned lru:22;        /* lru time (relative to server.lruclock) */
     int refcount;
     void *ptr;
-    /* VM fields, this are only allocated if VM is active, otherwise the
+    /* VM fields are only allocated if VM is active, otherwise the
      * object allocation function will just allocate
      * sizeof(redisObjct) minus sizeof(redisObjectVM), so using
      * Redis without VM active will not have any overhead. */
@@ -583,7 +583,7 @@ typedef struct zset {
 
 #define REDIS_SHARED_INTEGERS 10000
 struct sharedObjectsStruct {
-    robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *pong, *space,
+    robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *cnegone, *pong, *space,
     *colon, *nullbulk, *nullmultibulk, *queued,
     *emptymultibulk, *wrongtypeerr, *nokeyerr, *syntaxerr, *sameobjecterr,
     *outofrangeerr, *plus,
@@ -737,6 +737,9 @@ static void renameCommand(redisClient *c);
 static void renamenxCommand(redisClient *c);
 static void lpushCommand(redisClient *c);
 static void rpushCommand(redisClient *c);
+static void lpushxCommand(redisClient *c);
+static void rpushxCommand(redisClient *c);
+static void linsertCommand(redisClient *c);
 static void lpopCommand(redisClient *c);
 static void rpopCommand(redisClient *c);
 static void llenCommand(redisClient *c);
@@ -837,6 +840,9 @@ static struct redisCommand readonlyCommandTable[] = {
     {"mget",mgetCommand,-2,REDIS_CMD_INLINE,NULL,1,-1,1},
     {"rpush",rpushCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"lpush",lpushCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"rpushx",rpushxCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"lpushx",lpushxCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"linsert",linsertCommand,5,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"rpop",rpopCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"lpop",lpopCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"brpop",brpopCommand,-3,REDIS_CMD_INLINE,NULL,1,1,1},
@@ -1304,7 +1310,7 @@ static dictType keyptrDictType = {
     NULL,                      /* key dup */
     NULL,                      /* val dup */
     dictSdsKeyCompare,         /* key compare */
-    dictSdsDestructor,         /* key destructor */
+    NULL,                      /* key destructor */
     NULL                       /* val destructor */
 };
 
@@ -1723,6 +1729,7 @@ static void createSharedObjects(void) {
     shared.emptybulk = createObject(REDIS_STRING,sdsnew("$0\r\n\r\n"));
     shared.czero = createObject(REDIS_STRING,sdsnew(":0\r\n"));
     shared.cone = createObject(REDIS_STRING,sdsnew(":1\r\n"));
+    shared.cnegone = createObject(REDIS_STRING,sdsnew(":-1\r\n"));
     shared.nullbulk = createObject(REDIS_STRING,sdsnew("$-1\r\n"));
     shared.nullmultibulk = createObject(REDIS_STRING,sdsnew("*-1\r\n"));
     shared.emptymultibulk = createObject(REDIS_STRING,sdsnew("*0\r\n"));
@@ -3600,12 +3607,10 @@ static robj *dbRandomKey(redisDb *db) {
 
 /* Delete a key, value, and associated expiration entry if any, from the DB */
 static int dbDelete(redisDb *db, robj *key) {
-    int retval;
-
-    if (dictSize(db->expires)) dictDelete(db->expires,key->ptr);
-    retval = dictDelete(db->dict,key->ptr);
-
-    return retval == DICT_OK;
+    /* Deleting an entry from the expires dict will not free the sds of
+     * the key, because it is shared with the main dictionary. */
+    if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+    return dictDelete(db->dict,key->ptr) == DICT_OK;
 }
 
 /*============================ RDB saving/loading =========================== */
@@ -4328,10 +4333,16 @@ static robj *rdbLoadObject(int type, FILE *fp) {
 
             if (o->encoding == REDIS_ENCODING_ZIPMAP) {
                 unsigned char *zm = o->ptr;
+                robj *deckey, *decval;
 
-                zm = zipmapSet(zm,key->ptr,sdslen(key->ptr),
-                                  val->ptr,sdslen(val->ptr),NULL);
+                /* We need raw string objects to add them to the zipmap */
+                deckey = getDecodedObject(key);
+                decval = getDecodedObject(val);
+                zm = zipmapSet(zm,deckey->ptr,sdslen(deckey->ptr),
+                                  decval->ptr,sdslen(decval->ptr),NULL);
                 o->ptr = zm;
+                decrRefCount(deckey);
+                decrRefCount(decval);
                 decrRefCount(key);
                 decrRefCount(val);
             } else {
@@ -4995,7 +5006,7 @@ static void listTypePush(robj *subject, robj *value, int where) {
     /* Check if we need to convert the ziplist */
     listTypeTryConversion(subject,value);
     if (subject->encoding == REDIS_ENCODING_ZIPLIST &&
-        ziplistLen(subject->ptr) > server.list_max_ziplist_entries)
+        ziplistLen(subject->ptr) >= server.list_max_ziplist_entries)
             listTypeConvert(subject,REDIS_ENCODING_LIST);
 
     if (subject->encoding == REDIS_ENCODING_ZIPLIST) {
@@ -5157,6 +5168,36 @@ static robj *listTypeGet(listTypeEntry *entry) {
     return value;
 }
 
+static void listTypeInsert(listTypeEntry *entry, robj *value, int where) {
+    robj *subject = entry->li->subject;
+    if (entry->li->encoding == REDIS_ENCODING_ZIPLIST) {
+        value = getDecodedObject(value);
+        if (where == REDIS_TAIL) {
+            unsigned char *next = ziplistNext(subject->ptr,entry->zi);
+
+            /* When we insert after the current element, but the current element
+             * is the tail of the list, we need to do a push. */
+            if (next == NULL) {
+                subject->ptr = ziplistPush(subject->ptr,value->ptr,sdslen(value->ptr),REDIS_TAIL);
+            } else {
+                subject->ptr = ziplistInsert(subject->ptr,next,value->ptr,sdslen(value->ptr));
+            }
+        } else {
+            subject->ptr = ziplistInsert(subject->ptr,entry->zi,value->ptr,sdslen(value->ptr));
+        }
+        decrRefCount(value);
+    } else if (entry->li->encoding == REDIS_ENCODING_LIST) {
+        if (where == REDIS_TAIL) {
+            listInsertNode(subject->ptr,entry->ln,value,AL_START_TAIL);
+        } else {
+            listInsertNode(subject->ptr,entry->ln,value,AL_START_HEAD);
+        }
+        incrRefCount(value);
+    } else {
+        redisPanic("Unknown list encoding");
+    }
+}
+
 /* Compare the given object with the entry at the current position. */
 static int listTypeEqual(listTypeEntry *entry, robj *o) {
     listTypeIterator *li = entry->li;
@@ -5247,6 +5288,75 @@ static void lpushCommand(redisClient *c) {
 
 static void rpushCommand(redisClient *c) {
     pushGenericCommand(c,REDIS_TAIL);
+}
+
+static void pushxGenericCommand(redisClient *c, robj *refval, robj *val, int where) {
+    robj *subject;
+    listTypeIterator *iter;
+    listTypeEntry entry;
+    int inserted = 0;
+
+    if ((subject = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
+        checkType(c,subject,REDIS_LIST)) return;
+
+    if (refval != NULL) {
+        /* Note: we expect refval to be string-encoded because it is *not* the
+         * last argument of the multi-bulk LINSERT. */
+        redisAssert(refval->encoding == REDIS_ENCODING_RAW);
+
+        /* We're not sure if this value can be inserted yet, but we cannot
+         * convert the list inside the iterator. We don't want to loop over
+         * the list twice (once to see if the value can be inserted and once
+         * to do the actual insert), so we assume this value can be inserted
+         * and convert the ziplist to a regular list if necessary. */
+        listTypeTryConversion(subject,val);
+
+        /* Seek refval from head to tail */
+        iter = listTypeInitIterator(subject,0,REDIS_TAIL);
+        while (listTypeNext(iter,&entry)) {
+            if (listTypeEqual(&entry,refval)) {
+                listTypeInsert(&entry,val,where);
+                inserted = 1;
+                break;
+            }
+        }
+        listTypeReleaseIterator(iter);
+
+        if (inserted) {
+            /* Check if the length exceeds the ziplist length threshold. */
+            if (subject->encoding == REDIS_ENCODING_ZIPLIST &&
+                ziplistLen(subject->ptr) > server.list_max_ziplist_entries)
+                    listTypeConvert(subject,REDIS_ENCODING_LIST);
+            server.dirty++;
+        } else {
+            /* Notify client of a failed insert */
+            addReply(c,shared.cnegone);
+            return;
+        }
+    } else {
+        listTypePush(subject,val,where);
+        server.dirty++;
+    }
+
+    addReplyUlong(c,listTypeLength(subject));
+}
+
+static void lpushxCommand(redisClient *c) {
+    pushxGenericCommand(c,NULL,c->argv[2],REDIS_HEAD);
+}
+
+static void rpushxCommand(redisClient *c) {
+    pushxGenericCommand(c,NULL,c->argv[2],REDIS_TAIL);
+}
+
+static void linsertCommand(redisClient *c) {
+    if (strcasecmp(c->argv[2]->ptr,"after") == 0) {
+        pushxGenericCommand(c,c->argv[3],c->argv[4],REDIS_TAIL);
+    } else if (strcasecmp(c->argv[2]->ptr,"before") == 0) {
+        pushxGenericCommand(c,c->argv[3],c->argv[4],REDIS_HEAD);
+    } else {
+        addReply(c,shared.syntaxerr);
+    }
 }
 
 static void llenCommand(redisClient *c) {
@@ -7825,6 +7935,9 @@ static void monitorCommand(redisClient *c) {
 
 /* ================================= Expire ================================= */
 static int removeExpire(redisDb *db, robj *key) {
+    /* An expire may only be removed if there is a corresponding entry in the
+     * main dict. Otherwise, the key will never be freed. */
+    redisAssert(dictFind(db->dict,key->ptr) != NULL);
     if (dictDelete(db->expires,key->ptr) == DICT_OK) {
         return 1;
     } else {
@@ -7833,9 +7946,11 @@ static int removeExpire(redisDb *db, robj *key) {
 }
 
 static int setExpire(redisDb *db, robj *key, time_t when) {
-    sds copy = sdsdup(key->ptr);
-    if (dictAdd(db->expires,copy,(void*)when) == DICT_ERR) {
-        sdsfree(copy);
+    dictEntry *de;
+
+    /* Reuse the sds from the main dict in the expire dict */
+    redisAssert((de = dictFind(db->dict,key->ptr)) != NULL);
+    if (dictAdd(db->expires,dictGetEntryKey(de),(void*)when) == DICT_ERR) {
         return 0;
     } else {
         return 1;
@@ -7851,39 +7966,32 @@ static time_t getExpire(redisDb *db, robj *key) {
     if (dictSize(db->expires) == 0 ||
        (de = dictFind(db->expires,key->ptr)) == NULL) return -1;
 
+    /* The entry was found in the expire dict, this means it should also
+     * be present in the main dict (safety check). */
+    redisAssert(dictFind(db->dict,key->ptr) != NULL);
     return (time_t) dictGetEntryVal(de);
 }
 
 static int expireIfNeeded(redisDb *db, robj *key) {
-    time_t when;
-    dictEntry *de;
+    time_t when = getExpire(db,key);
+    if (when < 0) return 0;
 
-    /* No expire? return ASAP */
-    if (dictSize(db->expires) == 0 ||
-       (de = dictFind(db->expires,key->ptr)) == NULL) return 0;
-
-    /* Lookup the expire */
-    when = (time_t) dictGetEntryVal(de);
+    /* Return when this key has not expired */
     if (time(NULL) <= when) return 0;
 
     /* Delete the key */
-    dbDelete(db,key);
     server.stat_expiredkeys++;
-    return 1;
+    server.dirty++;
+    return dbDelete(db,key);
 }
 
 static int deleteIfVolatile(redisDb *db, robj *key) {
-    dictEntry *de;
-
-    /* No expire? return ASAP */
-    if (dictSize(db->expires) == 0 ||
-       (de = dictFind(db->expires,key->ptr)) == NULL) return 0;
+    if (getExpire(db,key) < 0) return 0;
 
     /* Delete the key */
-    server.dirty++;
     server.stat_expiredkeys++;
-    dictDelete(db->expires,key->ptr);
-    return dictDelete(db->dict,key->ptr) == DICT_OK;
+    server.dirty++;
+    return dbDelete(db,key);
 }
 
 static void expireGenericCommand(redisClient *c, robj *key, robj *param, long offset) {
@@ -9660,8 +9768,10 @@ static double computeObjectSwappability(robj *o) {
     /* actual age can be >= minage, but not < minage. As we use wrapping
      * 21 bit clocks with minutes resolution for the LRU. */
     time_t minage = abs(server.lruclock - o->lru);
-    long asize = 0;
+    long asize = 0, elesize;
+    robj *ele;
     list *l;
+    listNode *ln;
     dict *d;
     struct dictEntry *de;
     int z;
@@ -9676,17 +9786,18 @@ static double computeObjectSwappability(robj *o) {
         }
         break;
     case REDIS_LIST:
-        l = o->ptr;
-        listNode *ln = listFirst(l);
-
-        asize = sizeof(list);
-        if (ln) {
-            robj *ele = ln->value;
-            long elesize;
-
-            elesize = (ele->encoding == REDIS_ENCODING_RAW) ?
-                            (sizeof(*o)+sdslen(ele->ptr)) : sizeof(*o);
-            asize += (sizeof(listNode)+elesize)*listLength(l);
+        if (o->encoding == REDIS_ENCODING_ZIPLIST) {
+            asize = sizeof(*o)+ziplistSize(o->ptr);
+        } else {
+            l = o->ptr;
+            ln = listFirst(l);
+            asize = sizeof(list);
+            if (ln) {
+                ele = ln->value;
+                elesize = (ele->encoding == REDIS_ENCODING_RAW) ?
+                                (sizeof(*o)+sdslen(ele->ptr)) : sizeof(*o);
+                asize += (sizeof(listNode)+elesize)*listLength(l);
+            }
         }
         break;
     case REDIS_SET:
@@ -9697,9 +9808,6 @@ static double computeObjectSwappability(robj *o) {
         asize = sizeof(dict)+(sizeof(struct dictEntry*)*dictSlots(d));
         if (z) asize += sizeof(zset)-sizeof(dict);
         if (dictSize(d)) {
-            long elesize;
-            robj *ele;
-
             de = dictGetRandomKey(d);
             ele = dictGetEntryKey(de);
             elesize = (ele->encoding == REDIS_ENCODING_RAW) ?
@@ -9724,9 +9832,6 @@ static double computeObjectSwappability(robj *o) {
             d = o->ptr;
             asize = sizeof(dict)+(sizeof(struct dictEntry*)*dictSlots(d));
             if (dictSize(d)) {
-                long elesize;
-                robj *ele;
-
                 de = dictGetRandomKey(d);
                 ele = dictGetEntryKey(de);
                 elesize = (ele->encoding == REDIS_ENCODING_RAW) ?
