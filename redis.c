@@ -78,7 +78,6 @@
 #include "zipmap.h" /* Compact dictionary-alike data structure */
 #include "ziplist.h" /* Compact list data structure */
 #include "sha1.h"   /* SHA1 is used for DEBUG DIGEST */
-#include "release.h" /* Release and/or git repository information */
 
 /* Error codes */
 #define REDIS_OK                0
@@ -620,6 +619,8 @@ typedef struct iojob {
 } iojob;
 
 /*================================ Prototypes =============================== */
+char *redisGitSHA1(void);
+char *redisGitDirty(void);
 
 static void freeStringObject(robj *o);
 static void freeListObject(robj *o);
@@ -4325,8 +4326,10 @@ static robj *rdbLoadObject(int type, FILE *fp) {
             /* If we are using a zipmap and there are too big values
              * the object is converted to real hash table encoding. */
             if (o->encoding != REDIS_ENCODING_HT &&
-               (sdslen(key->ptr) > server.hash_max_zipmap_value ||
-                sdslen(val->ptr) > server.hash_max_zipmap_value))
+               ((key->encoding == REDIS_ENCODING_RAW &&
+                sdslen(key->ptr) > server.hash_max_zipmap_value) ||
+                (val->encoding == REDIS_ENCODING_RAW &&
+                sdslen(val->ptr) > server.hash_max_zipmap_value)))
             {
                     convertToRealHash(o);
             }
@@ -7833,8 +7836,8 @@ static sds genRedisInfoString(void) {
         "vm_enabled:%d\r\n"
         "role:%s\r\n"
         ,REDIS_VERSION,
-        REDIS_GIT_SHA1,
-        strtol(REDIS_GIT_DIRTY,NULL,10) > 0,
+        redisGitSHA1(),
+        strtol(redisGitDirty(),NULL,10) > 0,
         (sizeof(long) == 8) ? "64" : "32",
         aeGetApiName(),
         (long) getpid(),
@@ -11515,7 +11518,7 @@ static void daemonize(void) {
 
 static void version() {
     printf("Redis server version %s (%s:%d)\n", REDIS_VERSION,
-        REDIS_GIT_SHA1, atoi(REDIS_GIT_DIRTY) > 0);
+        redisGitSHA1(), atoi(redisGitDirty()) > 0);
     exit(0);
 }
 
