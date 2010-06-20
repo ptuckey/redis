@@ -780,6 +780,8 @@ static void debugCommand(redisClient *c);
 static void msetCommand(redisClient *c);
 static void msetnxCommand(redisClient *c);
 static void zaddCommand(redisClient *c);
+static void zaddnxCommand(redisClient *c);
+static void zaddcmpCommand(redisClient *c);
 static void zincrbyCommand(redisClient *c);
 static void zrangeCommand(redisClient *c);
 static void zrangebyscoreCommand(redisClient *c);
@@ -870,6 +872,8 @@ static struct redisCommand readonlyCommandTable[] = {
     {"sdiffstore",sdiffstoreCommand,-3,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,2,-1,1},
     {"smembers",sinterCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"zadd",zaddCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"zaddnx",zaddnxCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"zaddcmp",zaddcmpCommand,-4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"zincrby",zincrbyCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"zrem",zremCommand,3,REDIS_CMD_BULK,NULL,1,1,1},
     {"zremrangebyscore",zremrangebyscoreCommand,4,REDIS_CMD_INLINE,NULL,1,1,1},
@@ -6309,7 +6313,7 @@ zskiplistNode* zslistTypeGetElementByRank(zskiplist *zsl, unsigned long rank) {
 /* This generic command implements both ZADD and ZINCRBY.
  * scoreval is the score if the operation is a ZADD (doincrement == 0) or
  * the increment if the operation is a ZINCRBY (doincrement == 1). */
-static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scoreval, int doincrement) {
+static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scoreval, int doincrement, int nx, int cmp) {
     robj *zsetobj;
     zset *zs;
     double *score;
@@ -6371,15 +6375,19 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
             addReplyDouble(c,*score);
         else
             addReply(c,shared.cone);
+    } else if (nx) {
+        /* case 2: existing element, leave unchanged */
+        zfree(score);
+        addReply(c,shared.czero);
     } else {
         dictEntry *de;
         double *oldscore;
 
-        /* case 2: Score update operation */
+        /* case 3: Score update operation */
         de = dictFind(zs->dict,ele);
         redisAssert(de != NULL);
         oldscore = dictGetEntryVal(de);
-        if (*score != *oldscore) {
+        if ((cmp == 0 && *score != *oldscore) || (cmp > 0 && *score > *oldscore) || (cmp < 0 && *score < *oldscore)) {
             int deleted;
 
             /* Remove and insert the element in the skip list with new score */
@@ -6392,9 +6400,12 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
             server.dirty++;
         } else {
             zfree(score);
+            cmp = 0;
         }
         if (doincrement)
             addReplyDouble(c,*score);
+        else if (cmp != 0)
+            addReply(c,shared.cone);
         else
             addReply(c,shared.czero);
     }
@@ -6404,14 +6415,44 @@ static void zaddCommand(redisClient *c) {
     double scoreval;
 
     if (getDoubleFromObjectOrReply(c, c->argv[2], &scoreval, NULL) != REDIS_OK) return;
-    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0);
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0,0,0);
+}
+
+static void zaddnxCommand(redisClient *c) {
+    double scoreval;
+
+    if (getDoubleFromObjectOrReply(c, c->argv[2], &scoreval, NULL) != REDIS_OK) return;
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0,1,0);
+}
+
+static void zaddcmpCommand(redisClient *c) {
+    double scoreval;
+    int cmp = 1;
+
+    if (getDoubleFromObjectOrReply(c, c->argv[2], &scoreval, NULL) != REDIS_OK) return;
+
+    if (c->argc == 5) {
+        if (!strcasecmp(c->argv[4]->ptr,"min")) {
+            cmp = -1;
+        } else if (!strcasecmp(c->argv[4]->ptr,"max")) {
+            cmp = 1;
+        } else {
+            addReply(c,shared.syntaxerr);
+            return;
+        }
+    } else if (c->argc >= 5) {
+        addReply(c,shared.syntaxerr);
+        return;
+    }
+
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0,0,cmp);
 }
 
 static void zincrbyCommand(redisClient *c) {
     double scoreval;
 
     if (getDoubleFromObjectOrReply(c, c->argv[2], &scoreval, NULL) != REDIS_OK) return;
-    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,1);
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,1,0,0);
 }
 
 static void zremCommand(redisClient *c) {
