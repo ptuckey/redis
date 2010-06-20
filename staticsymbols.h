@@ -330,6 +330,8 @@ static struct redisFunctionSym symsTable[] = {
 {"yesnotoi",(unsigned long)yesnotoi},
 {"zaddCommand",(unsigned long)zaddCommand},
 {"zaddGenericCommand",(unsigned long)zaddGenericCommand},
+{"zaddcmpCommand",(unsigned long)zaddcmpCommand},
+{"zaddnxCommand",(unsigned long)zaddnxCommand},
 {"zcardCommand",(unsigned long)zcardCommand},
 {"zcountCommand",(unsigned long)zcountCommand},
 {"zincrbyCommand",(unsigned long)zincrbyCommand},
