@@ -2,6 +2,13 @@ set ::passed 0
 set ::failed 0
 set ::testnum 0
 
+proc assert {condition} {
+    if {![uplevel 1 expr $condition]} {
+        puts "!! ERROR\nExpected '$value' to evaluate to true"
+        error "assertion"
+    }
+}
+
 proc assert_match {pattern value} {
     if {![string match $pattern $value]} {
         puts "!! ERROR\nExpected '$value' to match '$pattern'"
@@ -17,7 +24,7 @@ proc assert_equal {expected value} {
 }
 
 proc assert_error {pattern code} {
-    if {[catch $code error]} {
+    if {[catch {uplevel 1 $code} error]} {
         assert_match $pattern $error
     } else {
         puts "!! ERROR\nExpected an error but nothing was catched"
