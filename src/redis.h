@@ -362,6 +362,8 @@ struct redisServer {
     sds aofbuf;       /* AOF buffer, written before entering the event loop */
     struct saveparam *saveparams;
     int saveparamslen;
+    int usesyslog;
+    int syslogfacility;
     char *logfile;
     char *bindaddr;
     char *dbfilename;
@@ -436,6 +438,11 @@ struct redisServer {
     unsigned lruclock:22;        /* clock incrementing every minute, for LRU */
     unsigned lruclock_padding:10;
 };
+
+typedef struct _syslog_code {
+    char *c_name;
+    int c_val;
+} SYSLOG_CODE;
 
 typedef struct pubsubPattern {
     redisClient *client;
@@ -555,6 +562,7 @@ typedef struct {
  *----------------------------------------------------------------------------*/
 
 extern struct redisServer server;
+extern const SYSLOG_CODE syslog_codes[];
 extern struct sharedObjectsStruct shared;
 extern dictType setDictType;
 extern dictType zsetDictType;

@@ -93,6 +93,25 @@ void loadServerConfig(char *filename) {
                 err = "Invalid log level. Must be one of debug, notice, warning";
                 goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"usesyslog") && argc == 2) {
+            if ((server.usesyslog = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
+        } else if (!strcasecmp(argv[0],"syslogfacility") && argc == 2) {
+            const SYSLOG_CODE *code;
+
+            for (code = syslog_codes; code->c_name; code++) {
+                if (!strcasecmp(code->c_name, argv[1])) {
+                    server.syslogfacility = code->c_val;
+                    break;
+                }
+            }
+
+            if (!code->c_name) {
+                err = sdscatprintf(sdsempty(),
+                    "Unknown syslog facility: %s", argv[1]);
+                goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"logfile") && argc == 2) {
             FILE *logfp;
 
