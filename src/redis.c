@@ -224,7 +224,7 @@ void oom(const char *msg) {
 /*====================== Hash table type implementation  ==================== */
 
 /* This is an hash table type that uses the SDS dynamic strings libary as
- * keys and radis objects as values (objects can hold SDS strings,
+ * keys and redis objects as values (objects can hold SDS strings,
  * lists, sets). */
 
 void dictVanillaFree(void *privdata, void *val)
