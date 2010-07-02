@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.14"
+#define REDIS_VERSION "1.3.15"
 
 #include "fmacros.h"
 #include "config.h"
@@ -2630,7 +2630,7 @@ static void replicationFeedMonitors(list *monitors, int dictid, robj **argv, int
 
     for (j = 0; j < argc; j++) {
         if (argv[j]->encoding == REDIS_ENCODING_INT) {
-            cmdrepr = sdscatprintf(cmdrepr, "%ld", (long)argv[j]->ptr);
+            cmdrepr = sdscatprintf(cmdrepr, "\"%ld\"", (long)argv[j]->ptr);
         } else {
             cmdrepr = sdscatrepr(cmdrepr,(char*)argv[j]->ptr,
                         sdslen(argv[j]->ptr));
@@ -8693,10 +8693,10 @@ static int rewriteAppendOnlyFile(char *filename) {
                     while((p = zipmapNext(p,&field,&flen,&val,&vlen)) != NULL) {
                         if (fwrite(cmd,sizeof(cmd)-1,1,fp) == 0) goto werr;
                         if (fwriteBulkObject(fp,key) == 0) goto werr;
-                        if (fwriteBulkString(fp,(char*)field,flen) == -1)
-                            return -1;
-                        if (fwriteBulkString(fp,(char*)val,vlen) == -1)
-                            return -1;
+                        if (fwriteBulkString(fp,(char*)field,flen) == 0)
+                            goto werr;
+                        if (fwriteBulkString(fp,(char*)val,vlen) == 0)
+                            goto werr;
                     }
                 } else {
                     dictIterator *di = dictGetIterator(o->ptr);
@@ -8708,8 +8708,8 @@ static int rewriteAppendOnlyFile(char *filename) {
 
                         if (fwrite(cmd,sizeof(cmd)-1,1,fp) == 0) goto werr;
                         if (fwriteBulkObject(fp,key) == 0) goto werr;
-                        if (fwriteBulkObject(fp,field) == -1) return -1;
-                        if (fwriteBulkObject(fp,val) == -1) return -1;
+                        if (fwriteBulkObject(fp,field) == 0) goto werr;
+                        if (fwriteBulkObject(fp,val) == 0) goto werr;
                     }
                     dictReleaseIterator(di);
                 }
