@@ -379,6 +379,7 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scoreval, i
         incrRefCount(ele); /* added to hash */
         zslInsert(zs->zsl,*score,ele);
         incrRefCount(ele); /* added to skiplist */
+        touchWatchedKey(c->db,c->argv[1]);
         server.dirty++;
         if (doincrement)
             addReplyDouble(c,*score);
@@ -406,6 +407,7 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scoreval, i
             incrRefCount(ele);
             /* Update the score in the hash table */
             dictReplace(zs->dict,ele,score);
+            touchWatchedKey(c->db,c->argv[1]);
             server.dirty++;
         } else {
             zfree(score);
@@ -489,6 +491,7 @@ void zremCommand(redisClient *c) {
     dictDelete(zs->dict,c->argv[2]);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
     if (dictSize(zs->dict) == 0) dbDelete(c->db,c->argv[1]);
+    touchWatchedKey(c->db,c->argv[1]);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -510,6 +513,7 @@ void zremrangebyscoreCommand(redisClient *c) {
     deleted = zslDeleteRangeByScore(zs->zsl,min,max,zs->dict);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
     if (dictSize(zs->dict) == 0) dbDelete(c->db,c->argv[1]);
+    if (deleted) touchWatchedKey(c->db,c->argv[1]);
     server.dirty += deleted;
     addReplyLongLong(c,deleted);
 }
@@ -548,6 +552,7 @@ void zremrangebyrankCommand(redisClient *c) {
     deleted = zslDeleteRangeByRank(zs->zsl,start+1,end+1,zs->dict);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
     if (dictSize(zs->dict) == 0) dbDelete(c->db,c->argv[1]);
+    if (deleted) touchWatchedKey(c->db,c->argv[1]);
     server.dirty += deleted;
     addReplyLongLong(c, deleted);
 }
@@ -739,6 +744,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     if (dstzset->zsl->length) {
         dbAdd(c->db,dstkey,dstobj);
         addReplyLongLong(c, dstzset->zsl->length);
+        touchWatchedKey(c->db,dstkey);
         server.dirty++;
     } else {
         decrRefCount(dstobj);
