@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.15"
+#define REDIS_VERSION "1.3.16"
 
 #include "fmacros.h"
 #include "config.h"
@@ -385,6 +385,7 @@ struct saveparam {
 
 /* Global server state structure */
 struct redisServer {
+    pthread_t mainthread;
     int port;
     int fd;
     redisDb *db;
@@ -1108,30 +1109,29 @@ static void redisLog(int level, const char *fmt, ...) {
     char msg[MAX_LOG_LEN];
     FILE *fp;
 
-    if (level >= server.verbosity) {
-        va_start(ap, fmt);
-        vsnprintf(msg, sizeof(msg), fmt, ap);
-        va_end(ap);
+    if (level < server.verbosity) return;
 
-        fp = (server.logfile == NULL) ? stdout : fopen(server.logfile, "a");
-        if (fp) {
-            char *c = ".-*#";
-            char buf[64];
-            time_t now;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
 
-            now = time(NULL);
-            strftime(buf, 64, "%d %b %H:%M:%S", localtime(&now));
+    fp = (server.logfile == NULL) ? stdout : fopen(server.logfile, "a");
+    if (fp) {
+        char *c = ".-*#";
+        char buf[64];
+        time_t now;
 
-            fprintf(fp, "[%d] %s %c %s\n", (int) getpid(), buf, c[level], msg);
-            fflush(fp);
+        now = time(NULL);
+        strftime(buf, 64, "%d %b %H:%M:%S", localtime(&now));
+        fprintf(fp, "[%d] %s %c %s\n", (int) getpid(), buf, c[level], msg);
+        fflush(fp);
 
-            if (server.logfile) fclose(fp);
-        }
+        if (server.logfile) fclose(fp);
+    }
 
-        if (server.usesyslog) {
-            int levels[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING};
-            syslog(levels[level], "%s", msg);
-        }
+    if (server.usesyslog) {
+        int levels[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING};
+        syslog(levels[level], "%s", msg);
     }
 }
 
@@ -1783,8 +1783,8 @@ static void initServer() {
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
 
+    server.mainthread = pthread_self();
     if (server.usesyslog) openlog("redis", LOG_NDELAY|LOG_PID, server.syslogfacility);
-
     server.devnull = fopen("/dev/null","w");
     if (server.devnull == NULL) {
         redisLog(REDIS_WARNING, "Can't open /dev/null: %s", server.neterr);
@@ -2105,17 +2105,24 @@ static void freeClient(redisClient *c) {
     ln = listSearchKey(server.clients,c);
     redisAssert(ln != NULL);
     listDelNode(server.clients,ln);
-    /* Remove from the list of clients waiting for swapped keys */
-    if (c->flags & REDIS_IO_WAIT && listLength(c->io_keys) == 0) {
-        ln = listSearchKey(server.io_ready_clients,c);
-        if (ln) {
+    /* Remove from the list of clients waiting for swapped keys, or ready
+     * to be restarted, but not yet woken up again. */
+    if (c->flags & REDIS_IO_WAIT) {
+        redisAssert(server.vm_enabled);
+        if (listLength(c->io_keys) == 0) {
+            ln = listSearchKey(server.io_ready_clients,c);
+
+            /* When this client is waiting to be woken up (REDIS_IO_WAIT),
+             * it should be present in the list io_ready_clients */
+            redisAssert(ln != NULL);
             listDelNode(server.io_ready_clients,ln);
-            server.vm_blocked_clients--;
+        } else {
+            while (listLength(c->io_keys)) {
+                ln = listFirst(c->io_keys);
+                dontWaitForSwappedKey(c,ln->value);
+            }
         }
-    }
-    while (server.vm_enabled && listLength(c->io_keys)) {
-        ln = listFirst(c->io_keys);
-        dontWaitForSwappedKey(c,ln->value);
+        server.vm_blocked_clients--;
     }
     listRelease(c->io_keys);
     /* Master/slave cleanup */
@@ -3002,7 +3009,8 @@ static robj *createStringObject(char *ptr, size_t len) {
 
 static robj *createStringObjectFromLongLong(long long value) {
     robj *o;
-    if (value >= 0 && value < REDIS_SHARED_INTEGERS) {
+    if (value >= 0 && value < REDIS_SHARED_INTEGERS &&
+        pthread_equal(pthread_self(),server.mainthread)) {
         incrRefCount(shared.integers[value]);
         o = shared.integers[value];
     } else {
@@ -3254,8 +3262,15 @@ static robj *tryObjectEncoding(robj *o) {
     /* Check if we can represent this string as a long integer */
     if (isStringRepresentableAsLong(s,&value) == REDIS_ERR) return o;
 
-    /* Ok, this object can be encoded */
-    if (value >= 0 && value < REDIS_SHARED_INTEGERS) {
+    /* Ok, this object can be encoded...
+     *
+     * Can I use a shared object? Only if the object is inside a given
+     * range and if this is the main thread, since when VM is enabled we
+     * have the constraint that I/O thread should only handle non-shared
+     * objects, in order to avoid race conditions (we don't have per-object
+     * locking). */
+    if (value >= 0 && value < REDIS_SHARED_INTEGERS &&
+        pthread_equal(pthread_self(),server.mainthread)) {
         decrRefCount(o);
         incrRefCount(shared.integers[value]);
         return shared.integers[value];
@@ -9979,6 +9994,11 @@ static int dontWaitForSwappedKey(redisClient *c, robj *key) {
     listIter li;
     struct dictEntry *de;
 
+    /* The key object might be destroyed when deleted from the c->io_keys
+     * list (and the "key" argument is physically the same object as the
+     * object inside the list), so we need to protect it. */
+    incrRefCount(key);
+
     /* Remove the key from the list of keys this client is waiting for. */
     listRewind(c->io_keys,&li);
     while ((ln = listNext(&li)) != NULL) {
@@ -9987,18 +10007,19 @@ static int dontWaitForSwappedKey(redisClient *c, robj *key) {
             break;
         }
     }
-    assert(ln != NULL);
+    redisAssert(ln != NULL);
 
     /* Remove the client form the key => waiting clients map. */
     de = dictFind(c->db->io_keys,key);
-    assert(de != NULL);
+    redisAssert(de != NULL);
     l = dictGetEntryVal(de);
     ln = listSearchKey(l,c);
-    assert(ln != NULL);
+    redisAssert(ln != NULL);
     listDelNode(l,ln);
     if (listLength(l) == 0)
         dictDelete(c->db->io_keys,key);
 
+    decrRefCount(key);
     return listLength(c->io_keys) == 0;
 }
 
