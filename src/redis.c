@@ -806,12 +806,10 @@ void initServer() {
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
 
-<<<<<<< HEAD
+    server.mainthread = pthread_self();
+
     if (server.usesyslog) openlog("redis",LOG_NDELAY|LOG_PID,server.syslogfacility);
 
-=======
-    server.mainthread = pthread_self();
->>>>>>> antirez/master
     server.devnull = fopen("/dev/null","w");
     if (server.devnull == NULL) {
         redisLog(REDIS_WARNING, "Can't open /dev/null: %s", server.neterr);
