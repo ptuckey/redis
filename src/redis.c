@@ -229,27 +229,27 @@ void redisLog(int level, const char *fmt, ...) {
     FILE *fp;
     static int levels[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING };
 
-    if (level >= server.verbosity) {
-        va_start(ap, fmt);
-        vsnprintf(msg, sizeof(msg), fmt, ap);
-        va_end(ap);
+    if (level < server.verbosity) return;
 
-        fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
-        if (fp) {
-            char *c = ".-*#";
-            char buf[64];
-            time_t now;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
 
-            now = time(NULL);
-            strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
-            fprintf(fp,"[%d] %s %c %s\n",(int)getpid(),buf,c[level],msg);
-            fflush(fp);
+    fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
+    if (fp) {
+        char *c = ".-*#";
+        char buf[64];
+        time_t now;
 
-            if (server.logfile) fclose(fp);
-        }
+        now = time(NULL);
+        strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
+        fprintf(fp,"[%d] %s %c %s\n",(int)getpid(),buf,c[level],msg);
+        fflush(fp);
 
-        if (server.usesyslog) syslog(levels[level], "%s", msg);
+        if (server.logfile) fclose(fp);
     }
+
+    if (server.usesyslog) syslog(levels[level], "%s", msg);
 }
 
 /* Redis generally does not try to recover from out of memory conditions
@@ -806,8 +806,12 @@ void initServer() {
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
 
+<<<<<<< HEAD
     if (server.usesyslog) openlog("redis",LOG_NDELAY|LOG_PID,server.syslogfacility);
 
+=======
+    server.mainthread = pthread_self();
+>>>>>>> antirez/master
     server.devnull = fopen("/dev/null","w");
     if (server.devnull == NULL) {
         redisLog(REDIS_WARNING, "Can't open /dev/null: %s", server.neterr);
