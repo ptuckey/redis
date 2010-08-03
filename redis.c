@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.16"
+#define REDIS_VERSION "1.3.17"
 
 #include "fmacros.h"
 #include "config.h"
@@ -3363,7 +3363,7 @@ static int getDoubleFromObject(robj *o, double *target) {
         redisAssert(o->type == REDIS_STRING);
         if (o->encoding == REDIS_ENCODING_RAW) {
             value = strtod(o->ptr, &eptr);
-            if (eptr[0] != '\0') return REDIS_ERR;
+            if (eptr[0] != '\0' || isnan(value)) return REDIS_ERR;
         } else if (o->encoding == REDIS_ENCODING_INT) {
             value = (long)o->ptr;
         } else {
@@ -4978,9 +4978,9 @@ static void lrangeCommand(redisClient *c) {
     if (start < 0) start = llen+start;
     if (end < 0) end = llen+end;
     if (start < 0) start = 0;
-    if (end < 0) end = 0;
 
-    /* indexes sanity checks */
+    /* Invariant: start >= 0, so this test will be true when end < 0.
+     * The range is empty when start > end or start >= length. */
     if (start > end || start >= llen) {
         /* Out of range start or start > end result in empty list */
         addReply(c,shared.emptymultibulk);
@@ -5017,9 +5017,9 @@ static void ltrimCommand(redisClient *c) {
     if (start < 0) start = llen+start;
     if (end < 0) end = llen+end;
     if (start < 0) start = 0;
-    if (end < 0) end = 0;
 
-    /* indexes sanity checks */
+    /* Invariant: start >= 0, so this test will be true when end < 0.
+     * The range is empty when start > end or start >= length. */
     if (start > end || start >= llen) {
         /* Out of range start or start > end result in empty list */
         ltrim = llen;
@@ -5813,11 +5813,6 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
     zset *zs;
     double *score;
 
-    if (isnan(scoreval)) {
-        addReplySds(c,sdsnew("-ERR provide score is Not A Number (nan)\r\n"));
-        return;
-    }
-
     zsetobj = lookupKeyWrite(c->db,key);
     if (zsetobj == NULL) {
         zsetobj = createZsetObject();
@@ -5848,7 +5843,7 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
         }
         if (isnan(*score)) {
             addReplySds(c,
-                sdsnew("-ERR resulting score is Not A Number (nan)\r\n"));
+                sdsnew("-ERR resulting score is not a number (NaN)\r\n"));
             zfree(score);
             /* Note that we don't need to check if the zset may be empty and
              * should be removed here, as we can only obtain Nan as score if
@@ -5902,15 +5897,13 @@ static void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double scor
 
 static void zaddCommand(redisClient *c) {
     double scoreval;
-
-    if (getDoubleFromObjectOrReply(c, c->argv[2], &scoreval, NULL) != REDIS_OK) return;
+    if (getDoubleFromObjectOrReply(c,c->argv[2],&scoreval,NULL) != REDIS_OK) return;
     zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0);
 }
 
 static void zincrbyCommand(redisClient *c) {
     double scoreval;
-
-    if (getDoubleFromObjectOrReply(c, c->argv[2], &scoreval, NULL) != REDIS_OK) return;
+    if (getDoubleFromObjectOrReply(c,c->argv[2],&scoreval,NULL) != REDIS_OK) return;
     zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,1);
 }
 
@@ -5984,9 +5977,9 @@ static void zremrangebyrankCommand(redisClient *c) {
     if (start < 0) start = llen+start;
     if (end < 0) end = llen+end;
     if (start < 0) start = 0;
-    if (end < 0) end = 0;
 
-    /* indexes sanity checks */
+    /* Invariant: start >= 0, so this test will be true when end < 0.
+     * The range is empty when start > end or start >= length. */
     if (start > end || start >= llen) {
         addReply(c,shared.czero);
         return;
@@ -6022,6 +6015,10 @@ static int qsortCompareZsetopsrcByCardinality(const void *s1, const void *s2) {
 inline static void zunionInterAggregate(double *target, double val, int aggregate) {
     if (aggregate == REDIS_AGGR_SUM) {
         *target = *target + val;
+        /* The result of adding two doubles is NaN when one variable
+         * is +inf and the other is -inf. When these numbers are added,
+         * we maintain the convention of the result being 0.0. */
+        if (isnan(*target)) *target = 0.0;
     } else if (aggregate == REDIS_AGGR_MIN) {
         *target = val < *target ? val : *target;
     } else if (aggregate == REDIS_AGGR_MAX) {
@@ -6081,8 +6078,12 @@ static void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
             if (remaining >= (zsetnum + 1) && !strcasecmp(c->argv[j]->ptr,"weights")) {
                 j++; remaining--;
                 for (i = 0; i < zsetnum; i++, j++, remaining--) {
-                    if (getDoubleFromObjectOrReply(c, c->argv[j], &src[i].weight, NULL) != REDIS_OK)
+                    if (getDoubleFromObjectOrReply(c,c->argv[j],&src[i].weight,
+                            "weight value is not a double") != REDIS_OK)
+                    {
+                        zfree(src);
                         return;
+                    }
                 }
             } else if (remaining >= 2 && !strcasecmp(c->argv[j]->ptr,"aggregate")) {
                 j++; remaining--;
@@ -6181,7 +6182,7 @@ static void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
         redisAssert(op == REDIS_OP_INTER || op == REDIS_OP_UNION);
     }
 
-    deleteKey(c->db,dstkey);
+    if (deleteKey(c->db,dstkey)) server.dirty++;
     if (dstzset->zsl->length) {
         dictAdd(c->db->dict,dstkey,dstobj);
         incrRefCount(dstkey);
@@ -6234,11 +6235,10 @@ static void zrangeGenericCommand(redisClient *c, int reverse) {
     if (start < 0) start = llen+start;
     if (end < 0) end = llen+end;
     if (start < 0) start = 0;
-    if (end < 0) end = 0;
 
-    /* indexes sanity checks */
+    /* Invariant: start >= 0, so this test will be true when end < 0.
+     * The range is empty when start > end or start >= length. */
     if (start > end || start >= llen) {
-        /* Out of range start or start > end result in empty list */
         addReply(c,shared.emptymultibulk);
         return;
     }
