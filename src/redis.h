@@ -869,6 +869,7 @@ void blpopCommand(redisClient *c);
 void brpopCommand(redisClient *c);
 void appendCommand(redisClient *c);
 void substrCommand(redisClient *c);
+void strlenCommand(redisClient *c);
 void zrankCommand(redisClient *c);
 void zrevrankCommand(redisClient *c);
 void hsetCommand(redisClient *c);
@@ -894,5 +895,12 @@ void punsubscribeCommand(redisClient *c);
 void publishCommand(redisClient *c);
 void watchCommand(redisClient *c);
 void unwatchCommand(redisClient *c);
+
+#if defined(__GNUC__)
+void *calloc(size_t count, size_t size) __attribute__ ((deprecated));
+void free(void *ptr) __attribute__ ((deprecated));
+void *malloc(size_t size) __attribute__ ((deprecated));
+void *realloc(void *ptr, size_t size) __attribute__ ((deprecated));
+#endif
 
 #endif

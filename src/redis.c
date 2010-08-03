@@ -75,6 +75,7 @@ struct redisCommand readonlyCommandTable[] = {
     {"setex",setexCommand,4,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,0,0,0},
     {"append",appendCommand,3,REDIS_CMD_BULK|REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"substr",substrCommand,4,REDIS_CMD_INLINE,NULL,1,1,1},
+    {"strlen",strlenCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"del",delCommand,-2,REDIS_CMD_INLINE,NULL,0,0,0},
     {"exists",existsCommand,2,REDIS_CMD_INLINE,NULL,1,1,1},
     {"incr",incrCommand,2,REDIS_CMD_INLINE|REDIS_CMD_DENYOOM,NULL,1,1,1},
@@ -874,7 +875,7 @@ int qsortRedisCommands(const void *r1, const void *r2) {
 
 void sortCommandTable() {
     /* Copy and sort the read-only version of the command table */
-    commandTable = (struct redisCommand*)malloc(sizeof(readonlyCommandTable));
+    commandTable = (struct redisCommand*)zmalloc(sizeof(readonlyCommandTable));
     memcpy(commandTable,readonlyCommandTable,sizeof(readonlyCommandTable));
     qsort(commandTable,
         sizeof(readonlyCommandTable)/sizeof(struct redisCommand),
