@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "1.3.17"
+#define REDIS_VERSION "2.0.0"
 
 #include "fmacros.h"
 #include "config.h"
@@ -390,6 +390,7 @@ struct redisServer {
     int fd;
     redisDb *db;
     long long dirty;            /* changes to DB from the last save */
+    long long dirty_before_bgsave; /* used to restore dirty on failed BGSAVE */
     list *clients;
     list *slaves, *monitors;
     char neterr[ANET_ERR_LEN];
@@ -1376,7 +1377,7 @@ void backgroundSaveDoneHandler(int statloc) {
     if (!bysignal && exitcode == 0) {
         redisLog(REDIS_NOTICE,
             "Background saving terminated with success");
-        server.dirty = 0;
+        server.dirty = server.dirty - server.dirty_before_bgsave;
         server.lastsave = time(NULL);
     } else if (!bysignal && exitcode != 0) {
         redisLog(REDIS_WARNING, "Background saving error");
@@ -3868,6 +3869,7 @@ static int rdbSaveBackground(char *filename) {
 
     if (server.bgsavechildpid != -1) return REDIS_ERR;
     if (server.vm_enabled) waitEmptyIOJobsQueue();
+    server.dirty_before_bgsave = server.dirty;
     if ((childpid = fork()) == 0) {
         /* Child */
         if (server.vm_enabled) vmReopenSwapFile();
@@ -7827,8 +7829,19 @@ static int handleClientsWaitingListPush(redisClient *c, robj *key, robj *ele) {
 /* Blocking RPOP/LPOP */
 static void blockingPopGenericCommand(redisClient *c, int where) {
     robj *o;
+    long long lltimeout;
     time_t timeout;
     int j;
+
+    /* Make sure timeout is an integer value */
+    if (getLongLongFromObjectOrReply(c,c->argv[c->argc-1],&lltimeout,
+            "timeout is not an integer") != REDIS_OK) return;
+
+    /* Make sure the timeout is not negative */
+    if (lltimeout < 0) {
+        addReplySds(c,sdsnew("-ERR timeout is negative\r\n"));
+        return;
+    }
 
     for (j = 1; j < c->argc-1; j++) {
         o = lookupKeyWrite(c->db,c->argv[j]);
@@ -7869,8 +7882,16 @@ static void blockingPopGenericCommand(redisClient *c, int where) {
             }
         }
     }
+
+    /* If we are inside a MULTI/EXEC and the list is empty the only thing
+     * we can do is treating it as a timeout (even with timeout 0). */
+    if (c->flags & REDIS_MULTI) {
+        addReply(c,shared.nullmultibulk);
+        return;
+    }
+
     /* If the list is empty or the key does not exists we must block */
-    timeout = strtol(c->argv[c->argc-1]->ptr,NULL,10);
+    timeout = lltimeout;
     if (timeout > 0) timeout += time(NULL);
     blockForKeys(c,c->argv+1,c->argc-2,timeout);
 }
@@ -7913,7 +7934,7 @@ static int syncRead(int fd, char *ptr, ssize_t size, int timeout) {
     while(size) {
         if (aeWait(fd,AE_READABLE,1000) & AE_READABLE) {
             nread = read(fd,ptr,size);
-            if (nread == -1) return -1;
+            if (nread <= 0) return -1;
             ptr += nread;
             size -= nread;
             totread += nread;
@@ -9019,6 +9040,11 @@ static void vmInit(void) {
     /* LZF requires a lot of stack */
     pthread_attr_init(&server.io_threads_attr);
     pthread_attr_getstacksize(&server.io_threads_attr, &stacksize);
+
+    /* Solaris may report a stacksize of 0, let's set it to 1 otherwise 115     
+     * multiplying it by 2 in the while loop later will not really help ;) */
+    if (!stacksize) stacksize = 1;
+
     while (stacksize < REDIS_THREAD_STACK_SIZE) stacksize *= 2;
     pthread_attr_setstacksize(&server.io_threads_attr, stacksize);
     /* Listen for events in the threaded I/O pipe */
@@ -9467,7 +9493,15 @@ static void freeIOJob(iojob *j) {
 
 /* Every time a thread finished a Job, it writes a byte into the write side
  * of an unix pipe in order to "awake" the main thread, and this function
- * is called. */
+ * is called.
+ *
+ * Note that this is called both by the event loop, when a I/O thread
+ * sends a byte in the notification pipe, and is also directly called from
+ * waitEmptyIOJobsQueue().
+ *
+ * In the latter case we don't want to swap more, so we use the
+ * "privdata" argument setting it to a not NULL value to signal this
+ * condition. */
 static void vmThreadedIOCompletedJob(aeEventLoop *el, int fd, void *privdata,
             int mask)
 {
@@ -9476,6 +9510,8 @@ static void vmThreadedIOCompletedJob(aeEventLoop *el, int fd, void *privdata,
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(mask);
     REDIS_NOTUSED(privdata);
+
+    if (privdata != NULL) trytoswap = 0; /* check the comments above... */
 
     /* For every byte we read in the read side of the pipe, there is one
      * I/O job completed to process. */
@@ -9786,7 +9822,8 @@ static void waitEmptyIOJobsQueue(void) {
         io_processed_len = listLength(server.io_processed);
         unlockThreadedIO();
         if (io_processed_len) {
-            vmThreadedIOCompletedJob(NULL,server.io_ready_pipe_read,NULL,0);
+            vmThreadedIOCompletedJob(NULL,server.io_ready_pipe_read,
+                                                        (void*)0xdeadbeef,0);
             usleep(1000); /* 1 millisecond */
         } else {
             usleep(10000); /* 10 milliseconds */
