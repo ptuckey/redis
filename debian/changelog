@@ -1,3 +1,9 @@
+redis (2:2.0.0-rdio.1) unstable; urgency=low
+
+  * Redis 2.0.0 final.
+
+ -- Manish Singh <manish@rd.io>  Sun,  5 Sep 2010 23:24:38 -0700
+
 redis (2:2.0.0~rc4-rdio.1) unstable; urgency=low
 
   * Sync with upstream debian packaging.
