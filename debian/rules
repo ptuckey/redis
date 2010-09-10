@@ -8,9 +8,8 @@ unexport CFLAGS
 override_dh_auto_test:
 	# Testsuite requires working TCP/IP and a non-interactive mode
 
-override_dh_auto_clean:
-	rm -rf mkreleasehdr.sh
-	dh_auto_clean
+override_dh_auto_install:
+	# redis make install is too simplistic
 
 override_dh_installinit:
 	dh_installinit -r

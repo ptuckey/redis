@@ -3,3 +3,5 @@ redis-benchmark		/usr/bin
 debian/redis.conf	/etc/redis
 redis-cli		/usr/bin
 debian/bash_completion.d	/etc
+redis-check-dump	/usr/bin
+redis-check-aof		/usr/bin
