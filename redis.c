@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "2.0.0"
+#define REDIS_VERSION "2.0.1"
 
 #include "fmacros.h"
 #include "config.h"
@@ -1571,10 +1571,21 @@ static int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientD
                 num = REDIS_EXPIRELOOKUPS_PER_CRON;
             while (num--) {
                 dictEntry *de;
+                robj *key;
                 time_t t;
 
                 if ((de = dictGetRandomKey(db->expires)) == NULL) break;
                 t = (time_t) dictGetEntryVal(de);
+                key = dictGetEntryKey(de);
+                /* Don't expire keys that are in the contest of I/O jobs.
+                 * Otherwise decrRefCount will kill the I/O thread and
+                 * clients waiting for this keys will wait forever.
+                 *
+                 * In general this change will not have any impact on the
+                 * performance of the expiring algorithm but it's much safer. */
+                if (server.vm_enabled &&
+                    (key->storage == REDIS_VM_SWAPPING ||
+                     key->storage == REDIS_VM_LOADING)) continue;
                 if (now > t) {
                     deleteKey(db,dictGetEntryKey(de));
                     expired++;
@@ -2795,6 +2806,14 @@ static redisClient *createClient(int fd) {
     anetNonBlock(NULL,fd);
     anetTcpNoDelay(NULL,fd);
     if (!c) return NULL;
+    if (aeCreateFileEvent(server.el,fd,AE_READABLE,
+        readQueryFromClient, c) == AE_ERR)
+    {
+        close(fd);
+        zfree(c);
+        return NULL;
+    }
+
     selectDb(c,0);
     c->fd = fd;
     c->querybuf = sdsempty();
@@ -2820,11 +2839,6 @@ static redisClient *createClient(int fd) {
     c->pubsub_patterns = listCreate();
     listSetFreeMethod(c->pubsub_patterns,decrRefCount);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
-    if (aeCreateFileEvent(server.el, c->fd, AE_READABLE,
-        readQueryFromClient, c) == AE_ERR) {
-        freeClient(c);
-        return NULL;
-    }
     listAddNodeTail(server.clients,c);
     initClientMultiState(c);
     return c;
@@ -3215,6 +3229,7 @@ static int deleteKey(redisDb *db, robj *key) {
      * it's count. This may happen when we get the object reference directly
      * from the hash table with dictRandomKey() or dict iterators */
     incrRefCount(key);
+    if (server.vm_enabled) handleClientsBlockedOnSwappedKey(db,key);
     if (dictSize(db->expires)) dictDelete(db->expires,key);
     retval = dictDelete(db->dict,key);
     decrRefCount(key);
