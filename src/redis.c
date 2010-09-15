@@ -1391,6 +1391,7 @@ void freeMemoryIfNeeded(void) {
                 }
                 keyobj = createStringObject(minkey,sdslen(minkey));
                 dbDelete(server.db+j,keyobj);
+                server.stat_expiredkeys++;
                 decrRefCount(keyobj);
             }
         }
