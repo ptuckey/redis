@@ -1141,7 +1141,7 @@ int prepareForShutdown() {
         /* Append only file: fsync() the AOF and exit */
         aof_fsync(server.appendfd);
         if (server.vm_enabled) unlink(server.vm_swap_file);
-    } else {
+    } else if (server.saveparamslen > 0) {
         /* Snapshotting. Perform a SYNC SAVE and exit */
         if (rdbSave(server.dbfilename) != REDIS_OK) {
             /* Ooops.. error saving! The best we can do is to continue
@@ -1152,6 +1152,8 @@ int prepareForShutdown() {
             redisLog(REDIS_WARNING,"Error trying to save the DB, can't exit");
             return REDIS_ERR;
         }
+    } else {
+        redisLog(REDIS_WARNING,"Not saving DB.");
     }
     if (server.daemonize) unlink(server.pidfile);
     redisLog(REDIS_WARNING,"Server exit now, bye bye...");
@@ -1233,6 +1235,7 @@ sds genRedisInfoString(void) {
         "used_memory:%zu\r\n"
         "used_memory_human:%s\r\n"
         "mem_fragmentation_ratio:%.2f\r\n"
+        "use_tcmalloc:%d\r\n"
         "changes_since_last_save:%lld\r\n"
         "bgsave_in_progress:%d\r\n"
         "last_save_time:%ld\r\n"
@@ -1267,6 +1270,11 @@ sds genRedisInfoString(void) {
         zmalloc_used_memory(),
         hmem,
         zmalloc_get_fragmentation_ratio(),
+#ifdef USE_TCMALLOC
+        1,
+#else
+        0,
+#endif
         server.dirty,
         server.bgsavechildpid != -1,
         server.lastsave,
@@ -1646,6 +1654,7 @@ void segvHandler(int sig, siginfo_t *info, void *secret) {
     int i, trace_size = 0;
     ucontext_t *uc = (ucontext_t*) secret;
     sds infostring;
+    struct sigaction act;
     REDIS_NOTUSED(info);
 
     redisLog(REDIS_WARNING,
@@ -1667,7 +1676,16 @@ void segvHandler(int sig, siginfo_t *info, void *secret) {
 
     /* free(messages); Don't call free() with possibly corrupted memory. */
     if (server.daemonize) unlink(server.pidfile);
-    _exit(0);
+
+    /* Make sure we exit with the right signal at the end. So for instance
+     * the core will be dumped if enabled. */
+    sigemptyset (&act.sa_mask);
+    /* When the SA_SIGINFO flag is set in sa_flags then sa_sigaction
+     * is used. Otherwise, sa_handler is used */
+    act.sa_flags = SA_NODEFER | SA_ONSTACK | SA_RESETHAND;
+    act.sa_handler = SIG_DFL;
+    sigaction (sig, &act, NULL);
+    kill(getpid(),sig);
 }
 
 void sigtermHandler(int sig) {
