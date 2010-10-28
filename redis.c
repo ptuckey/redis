@@ -6824,6 +6824,7 @@ static void hmgetCommand(redisClient *c) {
     o = lookupKeyRead(c->db,c->argv[1]);
     if (o != NULL && o->type != REDIS_HASH) {
         addReply(c,shared.wrongtypeerr);
+        return;
     }
 
     /* Note the check for o != NULL happens inside the loop. This is
