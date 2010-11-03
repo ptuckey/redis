@@ -12,6 +12,11 @@ else
   CFLAGS?= -std=c99 -pedantic $(OPTIMIZATION) -Wall -W $(ARCH) $(PROF)
   CCLINK?= -lm -pthread
 endif
+
+ifeq ($(USE_TCMALLOC),yes)
+  CCLINK+= -ltcmalloc
+  CFLAGS+= -DUSE_TCMALLOC
+endif
 CCOPT= $(CFLAGS) $(CCLINK) $(ARCH) $(PROF)
 DEBUG?= -g -rdynamic -ggdb 
 
