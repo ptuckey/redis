@@ -352,11 +352,16 @@ struct sharedObjectsStruct {
 struct redisServer {
     pthread_t mainthread;
     int port;
-    int fd;
+    char *bindaddr;
+    char *unixsocket;
+    int ipfd;
+    int sofd;
     redisDb *db;
     long long dirty;            /* changes to DB from the last save */
     long long dirty_before_bgsave; /* used to restore dirty on failed BGSAVE */
     list *clients;
+    dict *commands;             /* Command table hahs table */
+    struct redisCommand *delCommand, *multiCommand; /* often lookedup cmds */
     list *slaves, *monitors;
     char neterr[ANET_ERR_LEN];
     aeEventLoop *el;
@@ -393,7 +398,6 @@ struct redisServer {
     int usesyslog;
     int syslogfacility;
     char *logfile;
-    char *bindaddr;
     char *dbfilename;
     char *appendfilename;
     char *requirepass;
@@ -625,7 +629,8 @@ void *addDeferredMultiBulkLength(redisClient *c);
 void setDeferredMultiBulkLength(redisClient *c, void *node, long length);
 void addReplySds(redisClient *c, sds s);
 void processInputBuffer(redisClient *c);
-void acceptHandler(aeEventLoop *el, int fd, void *privdata, int mask);
+void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask);
+void acceptUnixHandler(aeEventLoop *el, int fd, void *privdata, int mask);
 void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask);
 void addReplyBulk(redisClient *c, robj *obj);
 void addReplyBulkCString(redisClient *c, char *s);
@@ -751,7 +756,8 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj);
 void freeMemoryIfNeeded(void);
 int processCommand(redisClient *c);
 void setupSigSegvAction(void);
-struct redisCommand *lookupCommand(char *name);
+struct redisCommand *lookupCommand(sds name);
+struct redisCommand *lookupCommandByCString(char *s);
 void call(redisClient *c, struct redisCommand *cmd);
 int prepareForShutdown();
 void redisLog(int level, const char *fmt, ...);
@@ -759,6 +765,7 @@ void usage();
 void updateDictResizePolicy(void);
 int htNeedsResize(dict *dict);
 void oom(const char *msg);
+void populateCommandTable(void);
 
 /* Virtual Memory */
 void vmInit(void);

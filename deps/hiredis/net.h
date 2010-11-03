@@ -1,6 +1,6 @@
-/* zmalloc - total amount of allocated memory aware version of malloc()
+/* Extracted from anet.c to work properly with Hiredis error reporting.
  *
- * Copyright (c) 2009-2010, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2006-2010, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,17 +28,10 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _ZMALLOC_H
-#define _ZMALLOC_H
+#ifndef __NET_H
+#define __NET_H
 
-void *zmalloc(size_t size);
-void *zcalloc(size_t size);
-void *zrealloc(void *ptr, size_t size);
-void zfree(void *ptr);
-char *zstrdup(const char *s);
-size_t zmalloc_used_memory(void);
-void zmalloc_enable_thread_safeness(void);
-float zmalloc_get_fragmentation_ratio(void);
-size_t zmalloc_get_rss(void);
+int redisContextConnectTcp(redisContext *c, const char *addr, int port);
+int redisContextConnectUnix(redisContext *c, const char *path);
 
-#endif /* _ZMALLOC_H */
+#endif

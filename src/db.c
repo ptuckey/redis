@@ -11,8 +11,11 @@ robj *lookupKey(redisDb *db, robj *key) {
     if (de) {
         robj *val = dictGetEntryVal(de);
 
-        /* Update the access time for the aging algorithm. */
-        val->lru = server.lruclock;
+        /* Update the access time for the aging algorithm.
+         * Don't do it if we have a saving child, as this will trigger
+         * a copy on write madness. */
+        if (server.bgsavechildpid == -1 && server.bgrewritechildpid == -1)
+            val->lru = server.lruclock;
 
         if (server.vm_enabled) {
             if (val->storage == REDIS_VM_MEMORY ||
@@ -432,16 +435,14 @@ time_t getExpire(redisDb *db, robj *key) {
  * will be consistent even if we allow write operations against expiring
  * keys. */
 void propagateExpire(redisDb *db, robj *key) {
-    struct redisCommand *cmd;
     robj *argv[2];
 
-    cmd = lookupCommand("del");
     argv[0] = createStringObject("DEL",3);
     argv[1] = key;
     incrRefCount(key);
 
     if (server.appendonly)
-        feedAppendOnlyFile(cmd,db->id,argv,2);
+        feedAppendOnlyFile(server.delCommand,db->id,argv,2);
     if (listLength(server.slaves))
         replicationFeedSlaves(server.slaves,db->id,argv,2);
 

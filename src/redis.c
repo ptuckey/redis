@@ -297,6 +297,15 @@ int dictSdsKeyCompare(void *privdata, const void *key1,
     return memcmp(key1, key2, l1) == 0;
 }
 
+/* A case insensitive version used for the command lookup table. */
+int dictSdsKeyCaseCompare(void *privdata, const void *key1,
+        const void *key2)
+{
+    DICT_NOTUSED(privdata);
+
+    return strcasecmp(key1, key2) == 0;
+}
+
 void dictRedisObjectDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
@@ -326,6 +335,10 @@ unsigned int dictObjHash(const void *key) {
 
 unsigned int dictSdsHash(const void *key) {
     return dictGenHashFunction((unsigned char*)key, sdslen((char*)key));
+}
+
+unsigned int dictSdsCaseHash(const void *key) {
+    return dictGenCaseHashFunction((unsigned char*)key, sdslen((char*)key));
 }
 
 int dictEncObjKeyCompare(void *privdata, const void *key1,
@@ -406,6 +419,16 @@ dictType keyptrDictType = {
     NULL,                      /* val dup */
     dictSdsKeyCompare,         /* key compare */
     NULL,                      /* key destructor */
+    NULL                       /* val destructor */
+};
+
+/* Command table. sds string -> command struct pointer. */
+dictType commandTableDictType = {
+    dictSdsCaseHash,           /* hash function */
+    NULL,                      /* key dup */
+    NULL,                      /* val dup */
+    dictSdsKeyCaseCompare,     /* key compare */
+    dictSdsDestructor,         /* key destructor */
     NULL                       /* val destructor */
 };
 
@@ -759,15 +782,18 @@ void createSharedObjects(void) {
 }
 
 void initServerConfig() {
-    server.dbnum = REDIS_DEFAULT_DBNUM;
     server.port = REDIS_SERVERPORT;
+    server.bindaddr = NULL;
+    server.unixsocket = NULL;
+    server.ipfd = -1;
+    server.sofd = -1;
+    server.dbnum = REDIS_DEFAULT_DBNUM;
     server.verbosity = REDIS_VERBOSE;
     server.maxidletime = REDIS_MAXIDLETIME;
     server.saveparams = NULL;
     server.usesyslog = 0;
     server.syslogfacility = LOG_LOCAL1;
     server.logfile = NULL; /* NULL = log on standard output */
-    server.bindaddr = NULL;
     server.glueoutputbuf = 1;
     server.daemonize = 0;
     server.appendonly = 0;
@@ -820,6 +846,14 @@ void initServerConfig() {
     R_PosInf = 1.0/R_Zero;
     R_NegInf = -1.0/R_Zero;
     R_Nan = R_Zero/R_Zero;
+
+    /* Command table -- we intiialize it here as it is part of the
+     * initial configuration, since command names may be changed via
+     * redis.conf using the rename-command directive. */
+    server.commands = dictCreate(&commandTableDictType,NULL);
+    populateCommandTable();
+    server.delCommand = lookupCommandByCString("del");
+    server.multiCommand = lookupCommandByCString("multi");
 }
 
 void initServer() {
@@ -843,9 +877,21 @@ void initServer() {
     createSharedObjects();
     server.el = aeCreateEventLoop();
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
-    server.fd = anetTcpServer(server.neterr, server.port, server.bindaddr);
-    if (server.fd == -1) {
-        redisLog(REDIS_WARNING, "Opening TCP port: %s", server.neterr);
+    server.ipfd = anetTcpServer(server.neterr,server.port,server.bindaddr);
+    if (server.ipfd == ANET_ERR) {
+        redisLog(REDIS_WARNING, "Opening port: %s", server.neterr);
+        exit(1);
+    }
+    if (server.unixsocket != NULL) {
+        unlink(server.unixsocket); /* don't care if this fails */
+        server.sofd = anetUnixServer(server.neterr,server.unixsocket);
+        if (server.sofd == ANET_ERR) {
+            redisLog(REDIS_WARNING, "Opening socket: %s", server.neterr);
+            exit(1);
+        }
+    }
+    if (server.ipfd < 0 && server.sofd < 0) {
+        redisLog(REDIS_WARNING, "Configured to not listen anywhere, exiting.");
         exit(1);
     }
     for (j = 0; j < server.dbnum; j++) {
@@ -876,8 +922,10 @@ void initServer() {
     server.stat_keyspace_hits = 0;
     server.unixtime = time(NULL);
     aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL);
-    if (aeCreateFileEvent(server.el, server.fd, AE_READABLE,
-        acceptHandler, NULL) == AE_ERR) oom("creating file event");
+    if (server.ipfd > 0 && aeCreateFileEvent(server.el,server.ipfd,AE_READABLE,
+        acceptTcpHandler,NULL) == AE_ERR) oom("creating file event");
+    if (server.sofd > 0 && aeCreateFileEvent(server.el,server.sofd,AE_READABLE,
+        acceptUnixHandler,NULL) == AE_ERR) oom("creating file event");
 
     if (server.appendonly) {
         server.appendfd = open(server.appendfilename,O_WRONLY|O_APPEND|O_CREAT,0644);
@@ -891,31 +939,34 @@ void initServer() {
     if (server.vm_enabled) vmInit();
 }
 
-int qsortRedisCommands(const void *r1, const void *r2) {
-    return strcasecmp(
-        ((struct redisCommand*)r1)->name,
-        ((struct redisCommand*)r2)->name);
-}
+/* Populates the Redis Command Table starting from the hard coded list
+ * we have on top of redis.c file. */
+void populateCommandTable(void) {
+    int j;
+    int numcommands = sizeof(readonlyCommandTable)/sizeof(struct redisCommand);
 
-void sortCommandTable() {
-    /* Copy and sort the read-only version of the command table */
-    commandTable = (struct redisCommand*)zmalloc(sizeof(readonlyCommandTable));
-    memcpy(commandTable,readonlyCommandTable,sizeof(readonlyCommandTable));
-    qsort(commandTable,
-        sizeof(readonlyCommandTable)/sizeof(struct redisCommand),
-        sizeof(struct redisCommand),qsortRedisCommands);
+    for (j = 0; j < numcommands; j++) {
+        struct redisCommand *c = readonlyCommandTable+j;
+        int retval;
+
+        retval = dictAdd(server.commands, sdsnew(c->name), c);
+        assert(retval == DICT_OK);
+    }
 }
 
 /* ====================== Commands lookup and execution ===================== */
 
-struct redisCommand *lookupCommand(char *name) {
-    struct redisCommand tmp = {name,NULL,0,0,NULL,0,0,0};
-    return bsearch(
-        &tmp,
-        commandTable,
-        sizeof(readonlyCommandTable)/sizeof(struct redisCommand),
-        sizeof(struct redisCommand),
-        qsortRedisCommands);
+struct redisCommand *lookupCommand(sds name) {
+    return dictFetchValue(server.commands, name);
+}
+
+struct redisCommand *lookupCommandByCString(char *s) {
+    struct redisCommand *cmd;
+    sds name = sdsnew(s);
+
+    cmd = dictFetchValue(server.commands, name);
+    sdsfree(name);
+    return cmd;
 }
 
 /* Call() is the core of Redis execution of a command */
@@ -1123,6 +1174,7 @@ sds genRedisInfoString(void) {
         "blocked_clients:%d\r\n"
         "used_memory:%zu\r\n"
         "used_memory_human:%s\r\n"
+        "used_memory_rss:%zu\r\n"
         "mem_fragmentation_ratio:%.2f\r\n"
         "use_tcmalloc:%d\r\n"
         "changes_since_last_save:%lld\r\n"
@@ -1158,6 +1210,7 @@ sds genRedisInfoString(void) {
         server.blpop_blocked_clients,
         zmalloc_used_memory(),
         hmem,
+        zmalloc_get_rss(),
         zmalloc_get_fragmentation_ratio(),
 #ifdef USE_TCMALLOC
         1,
@@ -1298,7 +1351,7 @@ void freeMemoryIfNeeded(void) {
         if (tryFreeOneObjectFromFreelist() == REDIS_OK) continue;
 
         for (j = 0; j < server.dbnum; j++) {
-            long bestval;
+            long bestval = 0; /* just to prevent warning */
             sds bestkey = NULL;
             struct dictEntry *de;
             redisDb *db = server.db+j;
@@ -1472,7 +1525,6 @@ int main(int argc, char **argv) {
     time_t start;
 
     initServerConfig();
-    sortCommandTable();
     if (argc == 2) {
         if (strcmp(argv[1], "-v") == 0 ||
             strcmp(argv[1], "--version") == 0) version();
@@ -1499,7 +1551,10 @@ int main(int argc, char **argv) {
         if (rdbLoad(server.dbfilename) == REDIS_OK)
             redisLog(REDIS_NOTICE,"DB loaded from disk: %ld seconds",time(NULL)-start);
     }
-    redisLog(REDIS_NOTICE,"The server is now ready to accept connections on port %d", server.port);
+    if (server.ipfd > 0)
+        redisLog(REDIS_NOTICE,"The server is now ready to accept connections on port %d", server.port);
+    if (server.sofd > 0)
+        redisLog(REDIS_NOTICE,"The server is now ready to accept connections at %s", server.unixsocket);
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeMain(server.el);
     aeDeleteEventLoop(server.el);
