@@ -1,3 +1,9 @@
+redis (2:2.0.4-rdio.1) unstable; urgency=low
+
+  * Redis 2.0.4 + tcmalloc.
+
+ -- Manish Singh <manish@rd.io>  Sat,  6 Nov 2010 18:40:49 -0700
+
 redis (2:2.0.3-rdio.1) unstable; urgency=low
 
   * Redis 2.0.3 + tcmalloc.
