@@ -27,7 +27,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDIS_VERSION "2.0.3"
+#define REDIS_VERSION "2.0.4"
 
 #include "fmacros.h"
 #include "config.h"
@@ -4296,7 +4296,7 @@ static int prepareForShutdown() {
         /* Append only file: fsync() the AOF and exit */
         fsync(server.appendfd);
         if (server.vm_enabled) unlink(server.vm_swap_file);
-    } else {
+    } else if (server.saveparamslen > 0) {
         /* Snapshotting. Perform a SYNC SAVE and exit */
         if (rdbSave(server.dbfilename) == REDIS_OK) {
             if (server.daemonize)
@@ -4311,6 +4311,8 @@ static int prepareForShutdown() {
             redisLog(REDIS_WARNING,"Error trying to save the DB, can't exit");
             return REDIS_ERR;
         }
+    } else {
+        redisLog(REDIS_WARNING,"Not saving DB.");
     }
     redisLog(REDIS_WARNING,"Server exit now, bye bye...");
     return REDIS_OK;
