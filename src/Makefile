@@ -26,7 +26,7 @@ INSTALL= cp -p
 
 OBJ = adlist.o ae.o anet.o dict.o redis.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o vm.o pubsub.o multi.o debug.o sort.o intset.o syncio.o
 BENCHOBJ = ae.o anet.o redis-benchmark.o sds.o adlist.o zmalloc.o
-CLIOBJ = anet.o sds.o adlist.o redis-cli.o zmalloc.o
+CLIOBJ = anet.o sds.o adlist.o redis-cli.o zmalloc.o release.o
 CHECKDUMPOBJ = redis-check-dump.o lzf_c.o lzf_d.o
 CHECKAOFOBJ = redis-check-aof.o
 
@@ -36,7 +36,7 @@ CLIPRGNAME = redis-cli
 CHECKDUMPPRGNAME = redis-check-dump
 CHECKAOFPRGNAME = redis-check-aof
 
-all: redis-server redis-benchmark redis-cli redis-check-dump redis-check-aof
+all: redis-benchmark redis-cli redis-check-dump redis-check-aof redis-server
 
 # Deps (use make dep to generate this)
 adlist.o: adlist.c adlist.h zmalloc.h
@@ -116,8 +116,8 @@ redis-benchmark.o:
 	$(CC) -c $(CFLAGS) -I../deps/hiredis $(DEBUG) $(COMPILE_TIME) $<
 
 redis-cli: $(CLIOBJ)
-	cd ../deps/hiredis && make static
-	cd ../deps/linenoise && make
+	cd ../deps/hiredis && make static ARCH="$(ARCH)"
+	cd ../deps/linenoise && make ARCH="$(ARCH)"
 	$(CC) -o $(CLIPRGNAME) $(CCOPT) $(DEBUG) $(CLIOBJ) ../deps/hiredis/libhiredis.a ../deps/linenoise/linenoise.o
 
 redis-cli.o:
@@ -134,6 +134,8 @@ redis-check-aof: $(CHECKAOFOBJ)
 
 clean:
 	rm -rf $(PRGNAME) $(BENCHPRGNAME) $(CLIPRGNAME) $(CHECKDUMPPRGNAME) $(CHECKAOFPRGNAME) *.o *.gcda *.gcno *.gcov
+	cd ../deps/hiredis && make clean
+	cd ../deps/linenoise && make clean
 
 dep:
 	$(CC) -MM *.c

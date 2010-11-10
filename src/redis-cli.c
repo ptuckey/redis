@@ -67,6 +67,7 @@ static struct config {
 } config;
 
 static void usage();
+char *redisGitSHA1(void);
 
 /*------------------------------------------------------------------------------
  * Utility functions
@@ -291,6 +292,7 @@ static int cliSendCommand(int argc, char **argv, int repeat) {
         redisAppendCommandArgv(context,argc,(const char**)argv,argvlen);
         while (config.monitor_mode) {
             if (cliReadReply() != REDIS_OK) exit(1);
+            fflush(stdout);
         }
 
         if (config.pubsub_mode) {
@@ -350,7 +352,7 @@ static int parseOptions(int argc, char **argv) {
 "automatically used as last argument.\n"
             );
         } else if (!strcmp(argv[i],"-v")) {
-            printf("redis-cli shipped with Redis version %s\n", REDIS_VERSION);
+            printf("redis-cli shipped with Redis version %s (%s)\n", REDIS_VERSION, redisGitSHA1());
             exit(0);
         } else {
             break;

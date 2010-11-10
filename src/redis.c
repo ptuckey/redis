@@ -127,7 +127,7 @@ struct redisCommand readonlyCommandTable[] = {
     {"zcount",zcountCommand,4,0,NULL,1,1,1},
     {"zrevrange",zrevrangeCommand,-4,0,NULL,1,1,1},
     {"zcard",zcardCommand,2,0,NULL,1,1,1},
-    {"zscore",zscoreCommand,3,REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"zscore",zscoreCommand,3,0,NULL,1,1,1},
     {"zrank",zrankCommand,3,0,NULL,1,1,1},
     {"zrevrank",zrevrankCommand,3,0,NULL,1,1,1},
     {"hset",hsetCommand,4,REDIS_CMD_DENYOOM,NULL,1,1,1},
@@ -747,6 +747,8 @@ void createSharedObjects(void) {
         "-ERR source and destination objects are the same\r\n"));
     shared.outofrangeerr = createObject(REDIS_STRING,sdsnew(
         "-ERR index out of range\r\n"));
+    shared.loadingerr = createObject(REDIS_STRING,sdsnew(
+        "-LOADING Redis is loading the dataset in memory\r\n"));
     shared.space = createObject(REDIS_STRING,sdsnew(" "));
     shared.colon = createObject(REDIS_STRING,sdsnew(":"));
     shared.plus = createObject(REDIS_STRING,sdsnew("+"));
@@ -786,6 +788,7 @@ void initServerConfig() {
     server.saveparams = NULL;
     server.usesyslog = 0;
     server.syslogfacility = LOG_LOCAL1;
+    server.loading = 0;
     server.logfile = NULL; /* NULL = log on standard output */
     server.glueoutputbuf = 1;
     server.daemonize = 0;
@@ -1054,6 +1057,12 @@ int processCommand(redisClient *c) {
         return REDIS_OK;
     }
 
+    /* Loading DB? Return an error if the command is not INFO */
+    if (server.loading && cmd->proc != infoCommand) {
+        addReply(c, shared.loadingerr);
+        return REDIS_OK;
+    }
+
     /* Exec the command */
     if (c->flags & REDIS_MULTI &&
         cmd->proc != execCommand && cmd->proc != discardCommand &&
@@ -1181,6 +1190,8 @@ sds genRedisInfoString(void) {
         "used_memory_rss:%zu\r\n"
         "mem_fragmentation_ratio:%.2f\r\n"
         "use_tcmalloc:%d\r\n"
+        "loading:%d\r\n"
+        "aof_enabled:%d\r\n"
         "changes_since_last_save:%lld\r\n"
         "bgsave_in_progress:%d\r\n"
         "last_save_time:%ld\r\n"
@@ -1221,6 +1232,8 @@ sds genRedisInfoString(void) {
 #else
         0,
 #endif
+        server.loading,
+        server.appendonly,
         server.dirty,
         server.bgsavechildpid != -1,
         server.lastsave,
@@ -1291,6 +1304,35 @@ sds genRedisInfoString(void) {
         );
         unlockThreadedIO();
     }
+    if (server.loading) {
+        double perc;
+        time_t eta, elapsed;
+        off_t remaining_bytes = server.loading_total_bytes-
+                                server.loading_loaded_bytes;
+
+        perc = ((double)server.loading_loaded_bytes /
+               server.loading_total_bytes) * 100;
+
+        elapsed = time(NULL)-server.loading_start_time;
+        if (elapsed == 0) {
+            eta = 1; /* A fake 1 second figure if we don't have enough info */
+        } else {
+            eta = (elapsed*remaining_bytes)/server.loading_loaded_bytes;
+        }
+
+        info = sdscatprintf(info,
+            "loading_start_time:%ld\r\n"
+            "loading_total_bytes:%llu\r\n"
+            "loading_loaded_bytes:%llu\r\n"
+            "loading_loaded_perc:%.2f\r\n"
+            "loading_eta_seconds:%ld\r\n"
+            ,(unsigned long) server.loading_start_time,
+            (unsigned long long) server.loading_total_bytes,
+            (unsigned long long) server.loading_loaded_bytes,
+            perc,
+            eta
+        );
+    }
     for (j = 0; j < server.dbnum; j++) {
         long long keys, vkeys;
 
@@ -1338,6 +1380,8 @@ void monitorCommand(redisClient *c) {
 void freeMemoryIfNeeded(void) {
     /* Remove keys accordingly to the active policy as long as we are
      * over the memory limit. */
+    if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION) return;
+
     while (server.maxmemory && zmalloc_used_memory() > server.maxmemory) {
         int j, k, freed = 0;
 
