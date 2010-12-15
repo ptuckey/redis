@@ -52,7 +52,6 @@
 #include <math.h>
 #include <pthread.h>
 #include <sys/resource.h>
-#include <syslog.h>
 
 /* Our shared "common" objects */
 
@@ -188,72 +187,31 @@ struct redisCommand readonlyCommandTable[] = {
     {"unwatch",unwatchCommand,1,0,NULL,0,0,0}
 };
 
-/* Maximum log message length */
-#define MAX_LOG_LEN 8192
-
-const SYSLOG_CODE syslog_codes[] = {
-#ifdef LOG_DAEMON
-    { "daemon",     LOG_DAEMON },
-#endif
-#ifdef LOG_USER
-    { "user",       LOG_USER },
-#endif
-#ifdef LOG_LOCAL0
-    { "local0",     LOG_LOCAL0 },
-#endif
-#ifdef LOG_LOCAL1
-    { "local1",     LOG_LOCAL1 },
-#endif
-#ifdef LOG_LOCAL2
-    { "local2",     LOG_LOCAL2 },
-#endif
-#ifdef LOG_LOCAL3
-    { "local3",     LOG_LOCAL3 },
-#endif
-#ifdef LOG_LOCAL4
-    { "local4",     LOG_LOCAL4 },
-#endif
-#ifdef LOG_LOCAL5
-    { "local5",     LOG_LOCAL5 },
-#endif
-#ifdef LOG_LOCAL6
-    { "local6",     LOG_LOCAL6 },
-#endif
-#ifdef LOG_LOCAL7
-    { "local7",     LOG_LOCAL7 },
-#endif
-    { NULL,  -1 }
-};
-
 /*============================ Utility functions ============================ */
 
 void redisLog(int level, const char *fmt, ...) {
     va_list ap;
-    char msg[MAX_LOG_LEN];
     FILE *fp;
-    static int levels[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING };
-
-    if (level < server.verbosity) return;
-
-    va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
 
     fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
-    if (fp) {
+    if (!fp) return;
+
+    va_start(ap, fmt);
+    if (level >= server.verbosity) {
         char *c = ".-*#";
         char buf[64];
         time_t now;
 
         now = time(NULL);
         strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
-        fprintf(fp,"[%d] %s %c %s\n",(int)getpid(),buf,c[level],msg);
+        fprintf(fp,"[%d] %s %c ",(int)getpid(),buf,c[level]);
+        vfprintf(fp, fmt, ap);
+        fprintf(fp,"\n");
         fflush(fp);
-
-        if (server.logfile) fclose(fp);
     }
+    va_end(ap);
 
-    if (server.usesyslog) syslog(levels[level], "%s", msg);
+    if (server.logfile) fclose(fp);
 }
 
 /* Redis generally does not try to recover from out of memory conditions
@@ -786,8 +744,6 @@ void initServerConfig() {
     server.verbosity = REDIS_VERBOSE;
     server.maxidletime = REDIS_MAXIDLETIME;
     server.saveparams = NULL;
-    server.usesyslog = 0;
-    server.syslogfacility = LOG_LOCAL1;
     server.loading = 0;
     server.logfile = NULL; /* NULL = log on standard output */
     server.glueoutputbuf = 1;
@@ -860,9 +816,11 @@ void initServer() {
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
 
-    server.mainthread = pthread_self();
-    if (server.usesyslog)
-        openlog("redis",LOG_NDELAY|LOG_PID,server.syslogfacility);
+    server.devnull = fopen("/dev/null","w");
+    if (server.devnull == NULL) {
+        redisLog(REDIS_WARNING, "Can't open /dev/null: %s", server.neterr);
+        exit(1);
+    }
     server.clients = listCreate();
     server.slaves = listCreate();
     server.monitors = listCreate();
@@ -1535,7 +1493,7 @@ void daemonize(void) {
 
     /* Every output goes to /dev/null. If Redis is daemonized but
      * the 'logfile' is set to 'stdout' in the configuration file
-     * it will not log at all unless logging to syslog is turned on. */
+     * it will not log at all. */
     if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
         dup2(fd, STDIN_FILENO);
         dup2(fd, STDOUT_FILENO);
