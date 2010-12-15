@@ -1,25 +1,23 @@
-set ::passed 0
-set ::failed 0
-set ::testnum 0
+set ::num_tests 0
+set ::num_passed 0
+set ::num_failed 0
+set ::tests_failed {}
 
 proc assert {condition} {
     if {![uplevel 1 expr $condition]} {
-        puts "!! ERROR\nExpected '$value' to evaluate to true"
-        error "assertion"
+        error "assertion:Expected '$value' to be true"
     }
 }
 
 proc assert_match {pattern value} {
     if {![string match $pattern $value]} {
-        puts "!! ERROR\nExpected '$value' to match '$pattern'"
-        error "assertion"
+        error "assertion:Expected '$value' to match '$pattern'"
     }
 }
 
 proc assert_equal {expected value} {
     if {$expected ne $value} {
-        puts "!! ERROR\nExpected '$value' to be equal to '$expected'"
-        error "assertion"
+        error "assertion:Expected '$value' to be equal to '$expected'"
     }
 }
 
@@ -27,8 +25,7 @@ proc assert_error {pattern code} {
     if {[catch {uplevel 1 $code} error]} {
         assert_match $pattern $error
     } else {
-        puts "!! ERROR\nExpected an error but nothing was catched"
-        error "assertion"
+        error "assertion:Expected an error but nothing was catched"
     }
 }
 
@@ -47,7 +44,61 @@ proc assert_type {type key} {
     assert_equal $type [r type $key]
 }
 
-proc test {name code {okpattern notspecified}} {
+# This is called before starting the test
+proc announce_test {s} {
+    if {[info exists ::env(TERM)] && [string match $::env(TERM) xterm]} {
+        puts -nonewline "$s\033\[0K"
+        flush stdout
+        set ::backward_count [string length $s]
+    }
+}
+
+# This is called after the test finished
+proc colored_dot {tags passed} {
+    if {[info exists ::env(TERM)] && [string match $::env(TERM) xterm]} {
+        # Go backward and delete what announc_test function printed.
+        puts -nonewline "\033\[${::backward_count}D\033\[0K\033\[J"
+
+        # Print a coloured char, accordingly to test outcome and tags.
+        if {[lsearch $tags list] != -1} {
+            set colorcode {31}
+            set ch L
+        } elseif {[lsearch $tags hash] != -1} {
+            set colorcode {32}
+            set ch H
+        } elseif {[lsearch $tags set] != -1} {
+            set colorcode {33}
+            set ch S
+        } elseif {[lsearch $tags zset] != -1} {
+            set colorcode {34}
+            set ch Z
+        } elseif {[lsearch $tags basic] != -1} {
+            set colorcode {35}
+            set ch B
+        } else {
+            set colorcode {37}
+            set ch .
+        }
+        if {$colorcode ne {}} {
+            if {$passed} {
+                puts -nonewline "\033\[0;${colorcode};40m"
+            } else {
+                puts -nonewline "\033\[7;${colorcode};40m"
+            }
+            puts -nonewline $ch
+            puts -nonewline "\033\[0m"
+            flush stdout
+        }
+    } else {
+        if {$passed} {
+            puts -nonewline .
+        } else {
+            puts -nonewline F
+        }
+    }
+}
+
+proc test {name code {okpattern undefined}} {
     # abort if tagged with a tag to deny
     foreach tag $::denytags {
         if {[lsearch $::tags $tag] >= 0} {
@@ -69,30 +120,64 @@ proc test {name code {okpattern notspecified}} {
         }
     }
 
-    incr ::testnum
-    puts -nonewline [format "#%03d %-68s " $::testnum $name]
-    flush stdout
+    incr ::num_tests
+    set details {}
+    lappend details $::curfile
+    lappend details $::tags
+    lappend details $name
+
+    if {$::verbose} {
+        puts -nonewline [format "#%03d %-68s " $::num_tests $name]
+        flush stdout
+    } else {
+        announce_test $name
+    }
+
     if {[catch {set retval [uplevel 1 $code]} error]} {
-        if {$error eq "assertion"} {
-            incr ::failed
+        if {[string match "assertion:*" $error]} {
+            set msg [string range $error 10 end]
+            lappend details $msg
+            lappend ::tests_failed $details
+
+            incr ::num_failed
+            if {$::verbose} {
+                puts "FAILED"
+                puts "$msg\n"
+            } else {
+                colored_dot $::tags 0
+            }
         } else {
-            puts "EXCEPTION"
-            puts "\nCaught error: $error"
-            error "exception"
+            # Re-raise, let handler up the stack take care of this.
+            error $error $::errorInfo
         }
     } else {
-        if {$okpattern eq "notspecified" || $okpattern eq $retval || [string match $okpattern $retval]} {
-            puts "PASSED"
-            incr ::passed
+        if {$okpattern eq "undefined" || $okpattern eq $retval || [string match $okpattern $retval]} {
+            incr ::num_passed
+            if {$::verbose} {
+                puts "PASSED"
+            } else {
+                colored_dot $::tags 1
+            }
         } else {
-            puts "!! ERROR expected\n'$okpattern'\nbut got\n'$retval'"
-            incr ::failed
+            set msg "Expected '$okpattern' to equal or match '$retval'"
+            lappend details $msg
+            lappend ::tests_failed $details
+
+            incr ::num_failed
+            if {$::verbose} {
+                puts "FAILED"
+                puts "$msg\n"
+            } else {
+                colored_dot $::tags 0
+            }
         }
     }
+    flush stdout
+
     if {$::traceleaks} {
         set output [exec leaks redis-server]
         if {![string match {*0 leaks*} $output]} {
-            puts "--------- Test $::testnum LEAKED! --------"
+            puts "--- Test \"$name\" leaked! ---"
             puts $output
             exit 1
         }

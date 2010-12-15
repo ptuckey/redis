@@ -74,10 +74,14 @@ struct redisCommand readonlyCommandTable[] = {
     {"setnx",setnxCommand,3,REDIS_CMD_DENYOOM,NULL,0,0,0},
     {"setex",setexCommand,4,REDIS_CMD_DENYOOM,NULL,0,0,0},
     {"append",appendCommand,3,REDIS_CMD_DENYOOM,NULL,1,1,1},
-    {"substr",substrCommand,4,0,NULL,1,1,1},
     {"strlen",strlenCommand,2,0,NULL,1,1,1},
     {"del",delCommand,-2,0,NULL,0,0,0},
     {"exists",existsCommand,2,0,NULL,1,1,1},
+    {"setbit",setbitCommand,4,REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"getbit",getbitCommand,3,0,NULL,1,1,1},
+    {"setrange",setrangeCommand,4,REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"getrange",getrangeCommand,4,0,NULL,1,1,1},
+    {"substr",getrangeCommand,4,0,NULL,1,1,1},
     {"incr",incrCommand,2,REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"decr",decrCommand,2,REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"mget",mgetCommand,-2,0,NULL,1,-1,1},
@@ -89,6 +93,7 @@ struct redisCommand readonlyCommandTable[] = {
     {"rpop",rpopCommand,2,0,NULL,1,1,1},
     {"lpop",lpopCommand,2,0,NULL,1,1,1},
     {"brpop",brpopCommand,-3,0,NULL,1,1,1},
+    {"brpoplpush",brpoplpushCommand,4,REDIS_CMD_DENYOOM,NULL,1,2,1},
     {"blpop",blpopCommand,-3,0,NULL,1,1,1},
     {"llen",llenCommand,2,0,NULL,1,1,1},
     {"lindex",lindexCommand,3,0,NULL,1,1,1},
@@ -96,7 +101,7 @@ struct redisCommand readonlyCommandTable[] = {
     {"lrange",lrangeCommand,4,0,NULL,1,1,1},
     {"ltrim",ltrimCommand,4,0,NULL,1,1,1},
     {"lrem",lremCommand,4,0,NULL,1,1,1},
-    {"rpoplpush",rpoplpushcommand,3,REDIS_CMD_DENYOOM,NULL,1,2,1},
+    {"rpoplpush",rpoplpushCommand,3,REDIS_CMD_DENYOOM,NULL,1,2,1},
     {"sadd",saddCommand,3,REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"srem",sremCommand,3,0,NULL,1,1,1},
     {"smove",smoveCommand,4,0,NULL,1,2,1},
@@ -190,28 +195,30 @@ struct redisCommand readonlyCommandTable[] = {
 /*============================ Utility functions ============================ */
 
 void redisLog(int level, const char *fmt, ...) {
+    const int syslogLevelMap[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING };
+    const char *c = ".-*#";
+    time_t now = time(NULL);
     va_list ap;
     FILE *fp;
+    char buf[64];
+    char msg[REDIS_MAX_LOGMSG_LEN];
+
+    if (level < server.verbosity) return;
 
     fp = (server.logfile == NULL) ? stdout : fopen(server.logfile,"a");
     if (!fp) return;
 
     va_start(ap, fmt);
-    if (level >= server.verbosity) {
-        char *c = ".-*#";
-        char buf[64];
-        time_t now;
-
-        now = time(NULL);
-        strftime(buf,64,"%d %b %H:%M:%S",localtime(&now));
-        fprintf(fp,"[%d] %s %c ",(int)getpid(),buf,c[level]);
-        vfprintf(fp, fmt, ap);
-        fprintf(fp,"\n");
-        fflush(fp);
-    }
+    vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
+    strftime(buf,sizeof(buf),"%d %b %H:%M:%S",localtime(&now));
+    fprintf(fp,"[%d] %s %c %s\n",(int)getpid(),buf,c[level],msg);
+    fflush(fp);
+
     if (server.logfile) fclose(fp);
+
+    if (server.syslog_enabled) syslog(syslogLevelMap[level], "%s", msg);
 }
 
 /* Redis generally does not try to recover from out of memory conditions
@@ -575,7 +582,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Close connections of timedout clients */
-    if ((server.maxidletime && !(loops % 100)) || server.blpop_blocked_clients)
+    if ((server.maxidletime && !(loops % 100)) || server.bpop_blocked_clients)
         closeTimedoutClients();
 
     /* Check if a background saving or AOF rewrite in progress terminated */
@@ -648,15 +655,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
  * for ready file descriptors. */
 void beforeSleep(struct aeEventLoop *eventLoop) {
     REDIS_NOTUSED(eventLoop);
+    listNode *ln;
+    redisClient *c;
 
     /* Awake clients that got all the swapped keys they requested */
     if (server.vm_enabled && listLength(server.io_ready_clients)) {
         listIter li;
-        listNode *ln;
 
         listRewind(server.io_ready_clients,&li);
         while((ln = listNext(&li))) {
-            redisClient *c = ln->value;
+            c = ln->value;
             struct redisCommand *cmd;
 
             /* Resume the client. */
@@ -674,6 +682,19 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
                 processInputBuffer(c);
         }
     }
+
+    /* Try to process pending commands for clients that were just unblocked. */
+    while (listLength(server.unblocked_clients)) {
+        ln = listFirst(server.unblocked_clients);
+        redisAssert(ln != NULL);
+        c = ln->value;
+        listDelNode(server.unblocked_clients,ln);
+
+        /* Process remaining data in the input buffer. */
+        if (c->querybuf && sdslen(c->querybuf) > 0)
+            processInputBuffer(c);
+    }
+
     /* Write the AOF buffer on disk */
     flushAppendOnlyFile();
 }
@@ -746,6 +767,9 @@ void initServerConfig() {
     server.saveparams = NULL;
     server.loading = 0;
     server.logfile = NULL; /* NULL = log on standard output */
+    server.syslog_enabled = 0;
+    server.syslog_ident = zstrdup("redis");
+    server.syslog_facility = LOG_LOCAL0;
     server.glueoutputbuf = 1;
     server.daemonize = 0;
     server.appendonly = 0;
@@ -761,7 +785,7 @@ void initServerConfig() {
     server.rdbcompression = 1;
     server.activerehashing = 1;
     server.maxclients = 0;
-    server.blpop_blocked_clients = 0;
+    server.bpop_blocked_clients = 0;
     server.maxmemory = 0;
     server.maxmemory_policy = REDIS_MAXMEMORY_VOLATILE_LRU;
     server.maxmemory_samples = 3;
@@ -816,14 +840,16 @@ void initServer() {
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
 
-    server.devnull = fopen("/dev/null","w");
-    if (server.devnull == NULL) {
-        redisLog(REDIS_WARNING, "Can't open /dev/null: %s", server.neterr);
-        exit(1);
+    if (server.syslog_enabled) {
+        openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT,
+            server.syslog_facility);
     }
+
+    server.mainthread = pthread_self();
     server.clients = listCreate();
     server.slaves = listCreate();
     server.monitors = listCreate();
+    server.unblocked_clients = listCreate();
     createSharedObjects();
     server.el = aeCreateEventLoop();
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
@@ -1176,7 +1202,7 @@ sds genRedisInfoString(void) {
         (float)c_ru.ru_stime.tv_sec+(float)c_ru.ru_stime.tv_usec/1000000,
         listLength(server.clients)-listLength(server.slaves),
         listLength(server.slaves),
-        server.blpop_blocked_clients,
+        server.bpop_blocked_clients,
         zmalloc_used_memory(),
         hmem,
         zmalloc_get_rss(),

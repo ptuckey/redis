@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <syslog.h>
 
 #include "ae.h"     /* Event driven programming library */
 #include "sds.h"    /* Dynamic safe strings */
@@ -47,6 +48,7 @@
 #define REDIS_REQUEST_MAX_SIZE (1024*1024*256) /* max bytes in inline command */
 #define REDIS_SHARED_INTEGERS 10000
 #define REDIS_REPLY_CHUNK_BYTES (5*1500) /* 5 TCP packets with default MTU */
+#define REDIS_MAX_LOGMSG_LEN    1024 /* Default maximum length of syslog messages */
 
 /* If more then REDIS_WRITEV_THRESHOLD write packets are pending use writev */
 #define REDIS_WRITEV_THRESHOLD      3
@@ -194,9 +196,9 @@
 /* Zip structure related defaults */
 #define REDIS_HASH_MAX_ZIPMAP_ENTRIES 64
 #define REDIS_HASH_MAX_ZIPMAP_VALUE 512
-#define REDIS_LIST_MAX_ZIPLIST_ENTRIES 1024
-#define REDIS_LIST_MAX_ZIPLIST_VALUE 32
-#define REDIS_SET_MAX_INTSET_ENTRIES 4096
+#define REDIS_LIST_MAX_ZIPLIST_ENTRIES 512
+#define REDIS_LIST_MAX_ZIPLIST_VALUE 64
+#define REDIS_SET_MAX_INTSET_ENTRIES 512
 
 /* Sets operations codes */
 #define REDIS_OP_UNION 0
@@ -293,6 +295,16 @@ typedef struct multiState {
     int count;              /* Total number of MULTI commands */
 } multiState;
 
+typedef struct blockingState {
+    robj **keys;            /* The key we are waiting to terminate a blocking
+                             * operation such as BLPOP. Otherwise NULL. */
+    int count;              /* Number of blocking keys */
+    time_t timeout;         /* Blocking operation timeout. If UNIX current time
+                             * is >= timeout then the operation timed out. */
+    robj *target;           /* The key that should receive the element,
+                             * for BRPOPLPUSH. */
+} blockingState;
+
 /* With multiplexing we need to take per-clinet state.
  * Clients are taken in a liked list. */
 typedef struct redisClient {
@@ -316,11 +328,7 @@ typedef struct redisClient {
     long repldboff;         /* replication DB file offset */
     off_t repldbsize;       /* replication DB file size */
     multiState mstate;      /* MULTI/EXEC state */
-    robj **blocking_keys;   /* The key we are waiting to terminate a blocking
-                             * operation such as BLPOP. Otherwise NULL. */
-    int blocking_keys_num;  /* Number of blocking keys */
-    time_t blockingto;      /* Blocking operation timeout. If UNIX current time
-                             * is >= blockingto then the operation timed out. */
+    blockingState bpop;   /* blocking state */
     list *io_keys;          /* Keys this client is waiting to be loaded from the
                              * swap file in order to continue. */
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
@@ -402,6 +410,9 @@ struct redisServer {
     struct saveparam *saveparams;
     int saveparamslen;
     char *logfile;
+    int syslog_enabled;
+    char *syslog_ident;
+    int syslog_facility;
     char *dbfilename;
     char *appendfilename;
     char *requirepass;
@@ -427,8 +438,9 @@ struct redisServer {
     int maxmemory_policy;
     int maxmemory_samples;
     /* Blocked clients */
-    unsigned int blpop_blocked_clients;
+    unsigned int bpop_blocked_clients;
     unsigned int vm_blocked_clients;
+    list *unblocked_clients;
     /* Sort parameters - qsort_r() is only available under BSD so we
      * have to take this state global, in order to pass it to sortCompare() */
     int sort_desc;
@@ -813,8 +825,9 @@ int setTypeRemove(robj *subject, robj *value);
 int setTypeIsMember(robj *subject, robj *value);
 setTypeIterator *setTypeInitIterator(robj *subject);
 void setTypeReleaseIterator(setTypeIterator *si);
-robj *setTypeNext(setTypeIterator *si);
-robj *setTypeRandomElement(robj *subject);
+int setTypeNext(setTypeIterator *si, robj **objele, int64_t *llele);
+robj *setTypeNextObject(setTypeIterator *si);
+int setTypeRandomElement(robj *setobj, robj **objele, int64_t *llele);
 unsigned long setTypeSize(robj *subject);
 void setTypeConvert(robj *subject, int enc);
 
@@ -822,7 +835,8 @@ void setTypeConvert(robj *subject, int enc);
 void convertToRealHash(robj *o);
 void hashTypeTryConversion(robj *subject, robj **argv, int start, int end);
 void hashTypeTryObjectEncoding(robj *subject, robj **o1, robj **o2);
-robj *hashTypeGet(robj *o, robj *key);
+int hashTypeGet(robj *o, robj *key, robj **objval, unsigned char **v, unsigned int *vlen);
+robj *hashTypeGetObject(robj *o, robj *key);
 int hashTypeExists(robj *o, robj *key);
 int hashTypeSet(robj *o, robj *key, robj *value);
 int hashTypeDelete(robj *o, robj *key);
@@ -830,7 +844,8 @@ unsigned long hashTypeLength(robj *o);
 hashTypeIterator *hashTypeInitIterator(robj *subject);
 void hashTypeReleaseIterator(hashTypeIterator *hi);
 int hashTypeNext(hashTypeIterator *hi);
-robj *hashTypeCurrent(hashTypeIterator *hi, int what);
+int hashTypeCurrent(hashTypeIterator *hi, int what, robj **objval, unsigned char **v, unsigned int *vlen);
+robj *hashTypeCurrentObject(hashTypeIterator *hi, int what);
 robj *hashTypeLookupWriteOrCreate(redisClient *c, robj *key);
 
 /* Pub / Sub */
@@ -887,6 +902,10 @@ void setexCommand(redisClient *c);
 void getCommand(redisClient *c);
 void delCommand(redisClient *c);
 void existsCommand(redisClient *c);
+void setbitCommand(redisClient *c);
+void getbitCommand(redisClient *c);
+void setrangeCommand(redisClient *c);
+void getrangeCommand(redisClient *c);
 void incrCommand(redisClient *c);
 void decrCommand(redisClient *c);
 void incrbyCommand(redisClient *c);
@@ -934,7 +953,7 @@ void flushdbCommand(redisClient *c);
 void flushallCommand(redisClient *c);
 void sortCommand(redisClient *c);
 void lremCommand(redisClient *c);
-void rpoplpushcommand(redisClient *c);
+void rpoplpushCommand(redisClient *c);
 void infoCommand(redisClient *c);
 void mgetCommand(redisClient *c);
 void monitorCommand(redisClient *c);
@@ -965,8 +984,8 @@ void execCommand(redisClient *c);
 void discardCommand(redisClient *c);
 void blpopCommand(redisClient *c);
 void brpopCommand(redisClient *c);
+void brpoplpushCommand(redisClient *c);
 void appendCommand(redisClient *c);
-void substrCommand(redisClient *c);
 void strlenCommand(redisClient *c);
 void zrankCommand(redisClient *c);
 void zrevrankCommand(redisClient *c);

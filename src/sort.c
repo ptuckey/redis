@@ -76,7 +76,7 @@ robj *lookupKeyByPattern(redisDb *db, robj *pattern, robj *subst) {
         /* Retrieve value from hash by the field name. This operation
          * already increases the refcount of the returned object. */
         initStaticStringObject(fieldobj,((char*)&fieldname)+(sizeof(struct sdshdr)));
-        o = hashTypeGet(o, &fieldobj);
+        o = hashTypeGetObject(o, &fieldobj);
     } else {
         if (o->type != REDIS_STRING) return NULL;
 
@@ -222,7 +222,7 @@ void sortCommand(redisClient *c) {
     } else if (sortval->type == REDIS_SET) {
         setTypeIterator *si = setTypeInitIterator(sortval);
         robj *ele;
-        while((ele = setTypeNext(si)) != NULL) {
+        while((ele = setTypeNextObject(si)) != NULL) {
             vector[j].obj = ele;
             vector[j].u.score = 0;
             vector[j].u.cmpobj = NULL;

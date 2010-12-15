@@ -121,7 +121,7 @@ void computeDatasetDigest(unsigned char *final) {
             } else if (o->type == REDIS_SET) {
                 setTypeIterator *si = setTypeInitIterator(o);
                 robj *ele;
-                while((ele = setTypeNext(si)) != NULL) {
+                while((ele = setTypeNextObject(si)) != NULL) {
                     xorObjectDigest(digest,ele);
                     decrRefCount(ele);
                 }
@@ -152,10 +152,10 @@ void computeDatasetDigest(unsigned char *final) {
                     unsigned char eledigest[20];
 
                     memset(eledigest,0,20);
-                    obj = hashTypeCurrent(hi,REDIS_HASH_KEY);
+                    obj = hashTypeCurrentObject(hi,REDIS_HASH_KEY);
                     mixObjectDigest(eledigest,obj);
                     decrRefCount(obj);
-                    obj = hashTypeCurrent(hi,REDIS_HASH_VALUE);
+                    obj = hashTypeCurrentObject(hi,REDIS_HASH_VALUE);
                     mixObjectDigest(eledigest,obj);
                     decrRefCount(obj);
                     xorDigest(digest,eledigest,20);
