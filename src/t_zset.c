@@ -349,7 +349,7 @@ static int zslParseRange(robj *min, robj *max, zrangespec *spec) {
  *----------------------------------------------------------------------------*/
 
 /* This generic command implements both ZADD and ZINCRBY. */
-void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int incr) {
+void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int incr, int nx, int cmp) {
     robj *zsetobj;
     zset *zs;
     zskiplistNode *znode;
@@ -405,6 +405,9 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int 
             addReplyDouble(c,score);
         else
             addReply(c,shared.cone);
+    } else if (nx) {
+        /* case 2: existing element, leave unchanged */
+        addReply(c,shared.czero);
     } else {
         dictEntry *de;
         robj *curobj;
@@ -419,7 +422,7 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int 
 
         /* When the score is updated, reuse the existing string object to
          * prevent extra alloc/dealloc of strings on ZINCRBY. */
-        if (score != *curscore) {
+        if ((cmp == 0 && score != *curscore) || (cmp > 0 && score > *curscore) || (cmp < 0 && score < *curscore)) {
             deleted = zslDelete(zs->zsl,*curscore,curobj);
             redisAssert(deleted != 0);
             znode = zslInsert(zs->zsl,score,curobj);
@@ -429,9 +432,13 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int 
             dictGetEntryVal(de) = &znode->score;
             touchWatchedKey(c->db,c->argv[1]);
             server.dirty++;
+        } else {
+            cmp = 0;
         }
         if (incr)
             addReplyDouble(c,score);
+        else if (cmp != 0)
+            addReply(c,shared.cone);
         else
             addReply(c,shared.czero);
     }
@@ -439,16 +446,50 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int 
 
 void zaddCommand(redisClient *c) {
     double scoreval;
+
     if (getDoubleFromObjectOrReply(c,c->argv[2],&scoreval,NULL) != REDIS_OK) return;
     c->argv[3] = tryObjectEncoding(c->argv[3]);
-    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0);
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0,0,0);
+}
+
+void zaddnxCommand(redisClient *c) {
+    double scoreval;
+
+    if (getDoubleFromObjectOrReply(c,c->argv[2],&scoreval,NULL) != REDIS_OK) return;
+    c->argv[3] = tryObjectEncoding(c->argv[3]);
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0,1,0);
+}
+
+void zaddcmpCommand(redisClient *c) {
+    double scoreval;
+    int cmp = 1;
+
+    if (getDoubleFromObjectOrReply(c,c->argv[2],&scoreval,NULL) != REDIS_OK) return;
+
+    if (c->argc == 5) {
+        if (!strcasecmp(c->argv[4]->ptr,"min")) {
+            cmp = -1;
+        } else if (!strcasecmp(c->argv[4]->ptr,"max")) {
+            cmp = 1;
+        } else {
+            addReply(c,shared.syntaxerr);
+            return;
+        }
+    } else if (c->argc >= 5) {
+        addReply(c,shared.syntaxerr);
+        return;
+    }
+
+    c->argv[3] = tryObjectEncoding(c->argv[3]);
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,0,0,cmp);
 }
 
 void zincrbyCommand(redisClient *c) {
     double scoreval;
+
     if (getDoubleFromObjectOrReply(c,c->argv[2],&scoreval,NULL) != REDIS_OK) return;
     c->argv[3] = tryObjectEncoding(c->argv[3]);
-    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,1);
+    zaddGenericCommand(c,c->argv[1],c->argv[3],scoreval,1,0,0);
 }
 
 void zremCommand(redisClient *c) {

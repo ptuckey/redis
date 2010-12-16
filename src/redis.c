@@ -117,6 +117,8 @@ struct redisCommand readonlyCommandTable[] = {
     {"sdiffstore",sdiffstoreCommand,-3,REDIS_CMD_DENYOOM,NULL,2,-1,1},
     {"smembers",sinterCommand,2,0,NULL,1,1,1},
     {"zadd",zaddCommand,4,REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"zaddnx",zaddnxCommand,4,REDIS_CMD_DENYOOM,NULL,1,1,1},
+    {"zaddcmp",zaddcmpCommand,-4,REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"zincrby",zincrbyCommand,4,REDIS_CMD_DENYOOM,NULL,1,1,1},
     {"zrem",zremCommand,3,0,NULL,1,1,1},
     {"zremrangebyscore",zremrangebyscoreCommand,4,0,NULL,1,1,1},
@@ -233,7 +235,7 @@ void oom(const char *msg) {
 /*====================== Hash table type implementation  ==================== */
 
 /* This is an hash table type that uses the SDS dynamic strings libary as
- * keys and radis objects as values (objects can hold SDS strings,
+ * keys and redis objects as values (objects can hold SDS strings,
  * lists, sets). */
 
 void dictVanillaFree(void *privdata, void *val)
