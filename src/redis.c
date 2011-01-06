@@ -770,7 +770,6 @@ void initServerConfig() {
     server.syslog_enabled = 0;
     server.syslog_ident = zstrdup("redis");
     server.syslog_facility = LOG_LOCAL0;
-    server.glueoutputbuf = 1;
     server.daemonize = 0;
     server.appendonly = 0;
     server.appendfsync = APPENDFSYNC_EVERYSEC;
@@ -893,6 +892,7 @@ void initServer() {
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
     server.stat_expiredkeys = 0;
+    server.stat_evictedkeys = 0;
     server.stat_starttime = time(NULL);
     server.stat_keyspace_misses = 0;
     server.stat_keyspace_hits = 0;
@@ -1179,6 +1179,7 @@ sds genRedisInfoString(void) {
         "total_connections_received:%lld\r\n"
         "total_commands_processed:%lld\r\n"
         "expired_keys:%lld\r\n"
+        "evicted_keys:%lld\r\n"
         "keyspace_hits:%lld\r\n"
         "keyspace_misses:%lld\r\n"
         "hash_max_zipmap_entries:%zu\r\n"
@@ -1221,6 +1222,7 @@ sds genRedisInfoString(void) {
         server.stat_numconnections,
         server.stat_numcommands,
         server.stat_expiredkeys,
+        server.stat_evictedkeys,
         server.stat_keyspace_hits,
         server.stat_keyspace_misses,
         server.hash_max_zipmap_entries,
@@ -1438,40 +1440,9 @@ void freeMemoryIfNeeded(void) {
             if (bestkey) {
                 robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
                 dbDelete(db,keyobj);
-                server.stat_expiredkeys++;
+                server.stat_evictedkeys++;
                 decrRefCount(keyobj);
                 freed++;
-            }
-        }
-        if (!freed) return; /* nothing to free... */
-    }
-
-    while(0) {
-        int j, k, freed = 0;
-        for (j = 0; j < server.dbnum; j++) {
-            int minttl = -1;
-            sds minkey = NULL;
-            robj *keyobj = NULL;
-            struct dictEntry *de;
-
-            if (dictSize(server.db[j].expires)) {
-                freed = 1;
-                /* From a sample of three keys drop the one nearest to
-                 * the natural expire */
-                for (k = 0; k < 3; k++) {
-                    time_t t;
-
-                    de = dictGetRandomKey(server.db[j].expires);
-                    t = (time_t) dictGetEntryVal(de);
-                    if (minttl == -1 || t < minttl) {
-                        minkey = dictGetEntryKey(de);
-                        minttl = t;
-                    }
-                }
-                keyobj = createStringObject(minkey,sdslen(minkey));
-                dbDelete(server.db+j,keyobj);
-                server.stat_expiredkeys++;
-                decrRefCount(keyobj);
             }
         }
         if (!freed) return; /* nothing to free... */
@@ -1506,7 +1477,7 @@ void createPidFile(void) {
     /* Try to write the pid file in a best-effort way. */
     FILE *fp = fopen(server.pidfile,"w");
     if (fp) {
-        fprintf(fp,"%d\n",getpid());
+        fprintf(fp,"%d\n",(int)getpid());
         fclose(fp);
     }
 }
