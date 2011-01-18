@@ -399,7 +399,7 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int 
         de = dictFind(zs->dict,ele);
         redisAssert(de != NULL);
         dictGetEntryVal(de) = &znode->score;
-        touchWatchedKey(c->db,c->argv[1]);
+        signalModifiedKey(c->db,c->argv[1]);
         server.dirty++;
         if (incr)
             addReplyDouble(c,score);
@@ -430,7 +430,7 @@ void zaddGenericCommand(redisClient *c, robj *key, robj *ele, double score, int 
 
             /* Update the score in the current dict entry */
             dictGetEntryVal(de) = &znode->score;
-            touchWatchedKey(c->db,c->argv[1]);
+            signalModifiedKey(c->db,c->argv[1]);
             server.dirty++;
         } else {
             cmp = 0;
@@ -518,7 +518,7 @@ void zremCommand(redisClient *c) {
     dictDelete(zs->dict,c->argv[2]);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
     if (dictSize(zs->dict) == 0) dbDelete(c->db,c->argv[1]);
-    touchWatchedKey(c->db,c->argv[1]);
+    signalModifiedKey(c->db,c->argv[1]);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -542,7 +542,7 @@ void zremrangebyscoreCommand(redisClient *c) {
     deleted = zslDeleteRangeByScore(zs->zsl,range,zs->dict);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
     if (dictSize(zs->dict) == 0) dbDelete(c->db,c->argv[1]);
-    if (deleted) touchWatchedKey(c->db,c->argv[1]);
+    if (deleted) signalModifiedKey(c->db,c->argv[1]);
     server.dirty += deleted;
     addReplyLongLong(c,deleted);
 }
@@ -581,7 +581,7 @@ void zremrangebyrankCommand(redisClient *c) {
     deleted = zslDeleteRangeByRank(zs->zsl,start+1,end+1,zs->dict);
     if (htNeedsResize(zs->dict)) dictResize(zs->dict);
     if (dictSize(zs->dict) == 0) dbDelete(c->db,c->argv[1]);
-    if (deleted) touchWatchedKey(c->db,c->argv[1]);
+    if (deleted) signalModifiedKey(c->db,c->argv[1]);
     server.dirty += deleted;
     addReplyLongLong(c, deleted);
 }
@@ -782,14 +782,14 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     }
 
     if (dbDelete(c->db,dstkey)) {
-        touchWatchedKey(c->db,dstkey);
+        signalModifiedKey(c->db,dstkey);
         touched = 1;
         server.dirty++;
     }
     if (dstzset->zsl->length) {
         dbAdd(c->db,dstkey,dstobj);
         addReplyLongLong(c, dstzset->zsl->length);
-        if (!touched) touchWatchedKey(c->db,dstkey);
+        if (!touched) signalModifiedKey(c->db,dstkey);
         server.dirty++;
     } else {
         decrRefCount(dstobj);

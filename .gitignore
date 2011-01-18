@@ -18,3 +18,5 @@ release.h
 src/transfer.sh
 src/configs
 src/redis-server.dSYM
+redis.ds
+src/redis.conf
