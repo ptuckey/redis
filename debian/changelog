@@ -1,3 +1,9 @@
+redis (2:2.1.11-rdio.2) unstable; urgency=low
+
+  * Redis 2.2.0rc3 + replication fixes.
+
+ -- Manish Singh <manish@rd.io>  Thu, 20 Jan 2011 15:39:18 -0800
+
 redis (2:2.1.11-rdio.1) unstable; urgency=low
 
   * Redis 2.2.0rc3.
