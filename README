@@ -2,10 +2,7 @@ Where to find complete Redis documentation?
 -------------------------------------------
 
 This README is just a fast "quick start" document. You can find more detailed
-documentation here:
-
-1) http://code.google.com/p/redis
-2) Check the 'doc' directory. doc/README.html is a good starting point :)
+documentation at http://redis.io
 
 Building Redis
 --------------
@@ -23,7 +20,7 @@ You can run a 32 bit Redis binary using:
 
     % make 32bit
 
-After you build Redis is a good idea to test it, using:
+After building Redis is a good idea to test it, using:
 
     % make test
 
@@ -80,7 +77,7 @@ then in another terminal try the following:
 
 You can find the list of all the available commands here:
 
-    http://code.google.com/p/redis/wiki/CommandReference
+    http://redis.io/commands
 
 Enjoy!
 
