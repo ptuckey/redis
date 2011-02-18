@@ -1,3 +1,9 @@
+redis (2:2.2.0-rdio.1) unstable; urgency=low
+
+  * Redis 2.2.0 final.
+
+ -- Manish Singh <manish@rd.io>  Thu, 17 Feb 2011 18:50:18 -0800
+
 redis (2:2.1.12-rdio.1) unstable; urgency=low
 
   * Redis 2.2.0rc4.
