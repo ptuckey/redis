@@ -1349,8 +1349,18 @@ sds genRedisInfoString(char *section) {
             info = sdscatprintf(info,
                 "cache_max_memory:%llu\r\n"
                 "cache_blocked_clients:%lu\r\n"
+                "cache_io_queue_len:%lu\r\n"
+                "cache_io_jobs_new:%lu\r\n"
+                "cache_io_jobs_processing:%lu\r\n"
+                "cache_io_jobs_processed:%lu\r\n"
+                "cache_io_ready_clients:%lu\r\n"
                 ,(unsigned long long) server.cache_max_memory,
-                (unsigned long) server.cache_blocked_clients
+                (unsigned long) server.cache_blocked_clients,
+                (unsigned long) listLength(server.cache_io_queue),
+                (unsigned long) listLength(server.io_newjobs),
+                (unsigned long) listLength(server.io_processing),
+                (unsigned long) listLength(server.io_processed),
+                (unsigned long) listLength(server.io_ready_clients)
             );
             unlockThreadedIO();
         }
@@ -1656,7 +1666,7 @@ void usage() {
 }
 
 int main(int argc, char **argv) {
-    time_t start;
+    long long start;
 
     initServerConfig();
     if (argc == 2) {
@@ -1677,15 +1687,15 @@ int main(int argc, char **argv) {
 #ifdef __linux__
     linuxOvercommitMemoryWarning();
 #endif
-    start = time(NULL);
+    start = ustime();
     if (server.ds_enabled) {
         redisLog(REDIS_NOTICE,"DB not loaded (running with disk back end)");
     } else if (server.appendonly) {
         if (loadAppendOnlyFile(server.appendfilename) == REDIS_OK)
-            redisLog(REDIS_NOTICE,"DB loaded from append only file: %ld seconds",time(NULL)-start);
+            redisLog(REDIS_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {
         if (rdbLoad(server.dbfilename) == REDIS_OK)
-            redisLog(REDIS_NOTICE,"DB loaded from disk: %ld seconds",time(NULL)-start);
+            redisLog(REDIS_NOTICE,"DB loaded from disk: %.3f seconds",(float)(ustime()-start)/1000000);
     }
     if (server.ipfd > 0)
         redisLog(REDIS_NOTICE,"The server is now ready to accept connections on port %d", server.port);
