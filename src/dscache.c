@@ -212,7 +212,7 @@ int cacheFreeOneEntry(void) {
         }
     }
     if (best == NULL) {
-        /* Was not able to fix a single object... we should check if our
+        /* Not able to free a single object? we should check if our
          * IO queues have stuff in queue, and try to consume the queue
          * otherwise we'll use an infinite amount of memory if changes to
          * the dataset are faster than I/O */
@@ -238,13 +238,6 @@ int cacheFreeOneEntry(void) {
         decrRefCount(kobj);
     }
     return REDIS_OK;
-}
-
-/* Return true if it's safe to swap out objects in a given moment.
- * Basically we don't want to swap objects out while there is a BGSAVE
- * or a BGAEOREWRITE running in backgroud. */
-int dsCanTouchDiskStore(void) {
-    return (server.bgsavechildpid == -1 && server.bgrewritechildpid == -1);
 }
 
 /* ==================== Disk store negative caching  ========================
@@ -325,8 +318,12 @@ void freeIOJob(iojob *j) {
  * of an unix pipe in order to "awake" the main thread, and this function
  * is called.
  *
- * If privdata != NULL the function will try to put more jobs in the queue
- * of IO jobs to process as more room is made. */
+ * If privdata == NULL the function will try to put more jobs in the queue
+ * of IO jobs to process as more room is made. privdata is equal to NULL
+ * when the function is called from the event loop, so we want to push
+ * more IO jobs in the queue. Instead when the function is called by
+ * other functions that want to create a write-barrier to avoid race 
+ * conditions we don't push new jobs in the queue. */
 void vmThreadedIOCompletedJob(aeEventLoop *el, int fd, void *privdata,
             int mask)
 {
@@ -386,13 +383,12 @@ void vmThreadedIOCompletedJob(aeEventLoop *el, int fd, void *privdata,
             }
             cacheScheduleIODelFlag(j->db,j->key,REDIS_IO_LOADINPROG);
             handleClientsBlockedOnSwappedKey(j->db,j->key);
-            freeIOJob(j);
         } else if (j->type == REDIS_IOJOB_SAVE) {
             cacheScheduleIODelFlag(j->db,j->key,REDIS_IO_SAVEINPROG);
-            freeIOJob(j);
         }
+        freeIOJob(j);
         processed++;
-        if (privdata != NULL) cacheScheduleIOPushJobs(0);
+        if (privdata == NULL) cacheScheduleIOPushJobs(0);
         if (processed == toprocess) return;
     }
     if (retval < 0 && errno != EAGAIN) {
@@ -591,8 +587,6 @@ void queueIOJob(iojob *j) {
     redisLog(REDIS_DEBUG,"Queued IO Job %p type %d about key '%s'\n",
         (void*)j, j->type, (char*)j->key->ptr);
     listAddNodeTail(server.io_newjobs,j);
-    if (server.io_active_threads < server.vm_max_threads)
-        spawnIOThread();
 }
 
 /* Consume all the IO scheduled operations, and all the thread IO jobs
@@ -896,8 +890,16 @@ int waitForSwappedKey(redisClient *c, robj *key) {
     listAddNodeTail(l,c);
 
     /* Are we already loading the key from disk? If not create a job */
-    if (de == NULL)
-        cacheScheduleIO(c->db,key,REDIS_IO_LOAD);
+    if (de == NULL) {
+        int flags = cacheScheduleIOGetFlags(c->db,key);
+
+        /* It is possible that even if there are no clients waiting for
+         * a load operation, still we have a load operation in progress.
+         * For instance think to a client performing a GET and then
+         * closing the connection */
+        if ((flags & (REDIS_IO_LOAD|REDIS_IO_LOADINPROG)) == 0)
+            cacheScheduleIO(c->db,key,REDIS_IO_LOAD);
+    }
     return 1;
 }
 
