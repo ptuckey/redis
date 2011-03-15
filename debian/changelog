@@ -1,20 +1,16 @@
-redis (2:2.2.2-0rdio2) unstable; urgency=low
-
-  * Rev rdio build.
-
- -- Manish Singh <manish@rd.io>  Tue, 15 Mar 2011 00:23:38 -0700
-
-redis (2:2.2.2-0rdio1) unstable; urgency=low
-
-  * New upstream release.
-
- -- Manish Singh <manish@rd.io>  Fri,  4 Mar 2011 18:14:30 -0800
-
-redis (2:2.2.1-1rdio1) unstable; urgency=low
+redis (2:2.2.2-1rdio1) unstable; urgency=low
 
   * Resync with upstream packaging.
 
- -- Manish Singh <manish@rd.io>  Fri, 25 Feb 2011 15:01:13 -0800
+ -- Manish Singh <manish@rd.io>  Tue, 15 Mar 2011 00:23:38 -0700
+
+redis (2:2.2.2-1) unstable; urgency=low
+
+  * New upstream release.
+  * Use userdel over deluser to prevent problems when purging package.
+    (Closes: #618326)
+
+ -- Chris Lamb <lamby@debian.org>  Tue, 15 Mar 2011 11:13:21 +0000
 
 redis (2:2.2.1-1) unstable; urgency=low
 
