@@ -1,3 +1,9 @@
+redis (2:2.2.2-0rdio2) unstable; urgency=low
+
+  * Rev rdio build.
+
+ -- Manish Singh <manish@rd.io>  Tue, 15 Mar 2011 00:23:38 -0700
+
 redis (2:2.2.2-0rdio1) unstable; urgency=low
 
   * New upstream release.
