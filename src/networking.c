@@ -416,7 +416,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     cfd = anetTcpAccept(server.neterr, fd, cip, &cport);
     if (cfd == AE_ERR) {
-        redisLog(REDIS_VERBOSE,"Accepting client connection: %s", server.neterr);
+        redisLog(REDIS_WARNING,"Accepting client connection: %s", server.neterr);
         return;
     }
     redisLog(REDIS_VERBOSE,"Accepted %s:%d", cip, cport);
@@ -431,7 +431,7 @@ void acceptUnixHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     cfd = anetUnixAccept(server.neterr, fd);
     if (cfd == AE_ERR) {
-        redisLog(REDIS_VERBOSE,"Accepting client connection: %s", server.neterr);
+        redisLog(REDIS_WARNING,"Accepting client connection: %s", server.neterr);
         return;
     }
     redisLog(REDIS_VERBOSE,"Accepted connection to %s", server.unixsocket);
@@ -523,10 +523,16 @@ void freeClient(redisClient *c) {
          * close the connection with all our slaves if we have any, so
          * when we'll resync with the master the other slaves will sync again
          * with us as well. Note that also when the slave is not connected
-         * to the master it will keep refusing connections by other slaves. */
-        while (listLength(server.slaves)) {
-            ln = listFirst(server.slaves);
-            freeClient((redisClient*)ln->value);
+         * to the master it will keep refusing connections by other slaves.
+         *
+         * We do this only if server.masterhost != NULL. If it is NULL this
+         * means the user called SLAVEOF NO ONE and we are freeing our
+         * link with the master, so no need to close link with slaves. */
+        if (server.masterhost != NULL) {
+            while (listLength(server.slaves)) {
+                ln = listFirst(server.slaves);
+                freeClient((redisClient*)ln->value);
+            }
         }
     }
     /* Release memory */
