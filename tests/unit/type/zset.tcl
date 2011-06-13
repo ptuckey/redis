@@ -48,6 +48,29 @@ start_server {tags {"zset"}} {
             assert_error "*NaN*" {r zincrby myzset -inf abc}
         }
 
+        test "ZADDNX basics" {
+            r del znx
+            r zadd znx 1 a
+            assert_equal 1 [r zaddnx znx 2 b]
+            assert_equal 0 [r zaddnx znx 3 a]
+            assert_equal {a b} [r zrange znx 0 -1]
+        }
+
+        test "ZADDCMP basics" {
+            r del zcmp
+            r zadd zcmp 1 a
+            assert_equal 1 [r zaddcmp zcmp 2 b]
+            assert_equal 1 [r zaddcmp zcmp 3 a]
+            assert_equal 0 [r zaddcmp zcmp 1 a]
+            assert_equal {b a} [r zrange zcmp 0 -1]
+            assert_equal 1 [r zaddcmp zcmp 2 a min]
+            assert_equal 1 [r zaddcmp zcmp 4 b max]
+            assert_equal 1 [r zaddcmp zcmp 5 c min]
+            assert_equal 1 [r zaddcmp zcmp 6 d max]
+            assert_equal 0 [r zaddcmp zcmp 7 a min]
+            assert_equal {a b c d} [r zrange zcmp 0 -1]
+        }
+
         test {ZADD - Variadic version base case} {
             r del myzset
             list [r zadd myzset 10 a 20 b 30 c] [r zrange myzset 0 -1 withscores]
