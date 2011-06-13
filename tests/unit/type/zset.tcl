@@ -51,25 +51,27 @@ start_server {tags {"zset"}} {
         test "ZADDNX basics" {
             r del znx
             r zadd znx 1 a
-            assert_equal 1 [r zaddnx znx 2 b]
-            assert_equal 0 [r zaddnx znx 3 a]
-            assert_equal {a b} [r zrange znx 0 -1]
-        }
+            set a1 [r zaddnx znx 2 b]
+            set a2 [r zaddnx znx 3 a]
+            set a3 [r zrange znx 0 -1]
+            list $a1 $a2 $a3
+        } {1 0 {a b}}
 
         test "ZADDCMP basics" {
             r del zcmp
             r zadd zcmp 1 a
-            assert_equal 1 [r zaddcmp zcmp 2 b]
-            assert_equal 1 [r zaddcmp zcmp 3 a]
-            assert_equal 0 [r zaddcmp zcmp 1 a]
-            assert_equal {b a} [r zrange zcmp 0 -1]
-            assert_equal 1 [r zaddcmp zcmp 2 a min]
-            assert_equal 1 [r zaddcmp zcmp 4 b max]
-            assert_equal 1 [r zaddcmp zcmp 5 c min]
-            assert_equal 1 [r zaddcmp zcmp 6 d max]
-            assert_equal 0 [r zaddcmp zcmp 7 a min]
-            assert_equal {a b c d} [r zrange zcmp 0 -1]
-        }
+            set a1 [r zaddcmp zcmp 2 b]
+            set a2 [r zaddcmp zcmp 3 a]
+            set a3 [r zaddcmp zcmp 1 a]
+            set a4 [r zrange zcmp 0 -1]
+            set a5 [r zaddcmp zcmp 2 a min]
+            set a6 [r zaddcmp zcmp 4 b max]
+            set a7 [r zaddcmp zcmp 5 c min]
+            set a8 [r zaddcmp zcmp 6 d max]
+            set a9 [r zaddcmp zcmp 7 a min]
+            set a10 [r zrange zcmp 0 -1]
+            list $a1 $a2 $a3 $a4 $a5 $a6 $a7 $a8 $a9 $a10
+        } {1 1 0 {b a} 1 1 1 1 0 {a b c d}}
 
         test {ZADD - Variadic version base case} {
             r del myzset
