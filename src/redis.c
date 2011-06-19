@@ -637,7 +637,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
          {
             int base = server.auto_aofrewrite_base_size ?
                             server.auto_aofrewrite_base_size : 1;
-            long long growth = (server.appendonly_current_size*100/base);
+            long long growth = (server.appendonly_current_size*100/base) - 100;
             if (growth >= server.auto_aofrewrite_perc) {
                 redisLog(REDIS_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
                 rewriteAppendOnlyFileBackground();
@@ -855,6 +855,7 @@ void initServerConfig() {
     server.replstate = REDIS_REPL_NONE;
     server.repl_syncio_timeout = REDIS_REPL_SYNCIO_TIMEOUT;
     server.repl_serve_stale_data = 1;
+    server.repl_down_since = -1;
 
     /* Double constants initialization */
     R_Zero = 0.0;
@@ -1319,7 +1320,14 @@ sds genRedisInfoString(void) {
                 (int)(time(NULL)-server.repl_transfer_lastio)
             );
         }
+
+        if (server.replstate != REDIS_REPL_CONNECTED) {
+            info = sdscatprintf(info,
+                "master_link_down_since_seconds:%ld\r\n",
+                (long)time(NULL)-server.repl_down_since);
+        }
     }
+
     if (server.vm_enabled) {
         lockThreadedIO();
         info = sdscatprintf(info,
