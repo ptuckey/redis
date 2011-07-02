@@ -1178,8 +1178,8 @@ sds genRedisInfoString(void) {
         "lru_clock:%ld\r\n"
         "used_cpu_sys:%.2f\r\n"
         "used_cpu_user:%.2f\r\n"
-        "used_cpu_sys_childrens:%.2f\r\n"
-        "used_cpu_user_childrens:%.2f\r\n"
+        "used_cpu_sys_children:%.2f\r\n"
+        "used_cpu_user_children:%.2f\r\n"
         "connected_clients:%d\r\n"
         "connected_slaves:%d\r\n"
         "client_longest_output_list:%lu\r\n"
@@ -1336,18 +1336,6 @@ sds genRedisInfoString(void) {
             eta
         );
     }
-
-    info = sdscat(info,"allocation_stats:");
-    for (j = 0; j <= ZMALLOC_MAX_ALLOC_STAT; j++) {
-        size_t count = zmalloc_allocations_for_size(j);
-        if (count) {
-            if (info[sdslen(info)-1] != ':') info = sdscatlen(info,",",1);
-            info = sdscatprintf(info,"%s%d=%zu",
-                (j == ZMALLOC_MAX_ALLOC_STAT) ? ">=" : "",
-                j,count);
-        }
-    }
-    info = sdscat(info,"\r\n");
 
     for (j = 0; j < server.dbnum; j++) {
         long long keys, vkeys;
