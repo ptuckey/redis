@@ -897,7 +897,7 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp) {
                     zobj->ptr = zzlDelete(zobj->ptr,eptr);
                     zobj->ptr = zzlInsert(zobj->ptr,ele,score);
 
-                    touchWatchedKey(c->db,key);
+                    signalModifiedKey(c->db,key);
                     server.dirty++;
                     if (cmp != 0) added++;
                 }
@@ -910,7 +910,7 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp) {
                 if (sdslen(ele->ptr) > server.zset_max_ziplist_value)
                     zsetConvert(zobj,REDIS_ENCODING_SKIPLIST);
 
-                touchWatchedKey(c->db,key);
+                signalModifiedKey(c->db,key);
                 server.dirty++;
                 if (!incr) added++;
             }
@@ -949,7 +949,7 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp) {
                     incrRefCount(curobj); /* Re-inserted in skiplist. */
                     dictGetEntryVal(de) = &znode->score; /* Update score ptr. */
 
-                    touchWatchedKey(c->db,key);
+                    signalModifiedKey(c->db,key);
                     server.dirty++;
                     if (cmp != 0) added++;
                 }
@@ -959,7 +959,7 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp) {
                 redisAssert(dictAdd(zs->dict,ele,&znode->score) == DICT_OK);
                 incrRefCount(ele); /* Added to dictionary. */
 
-                touchWatchedKey(c->db,key);
+                signalModifiedKey(c->db,key);
                 server.dirty++;
                 if (!incr) added++;
             }
@@ -1039,7 +1039,7 @@ void zremCommand(redisClient *c) {
     }
 
     if (deleted) {
-        touchWatchedKey(c->db,key);
+        signalModifiedKey(c->db,key);
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
@@ -1072,7 +1072,7 @@ void zremrangebyscoreCommand(redisClient *c) {
         redisPanic("Unknown sorted set encoding");
     }
 
-    if (deleted) touchWatchedKey(c->db,key);
+    if (deleted) signalModifiedKey(c->db,key);
     server.dirty += deleted;
     addReplyLongLong(c,deleted);
 }
@@ -1120,7 +1120,7 @@ void zremrangebyrankCommand(redisClient *c) {
         redisPanic("Unknown sorted set encoding");
     }
 
-    if (deleted) touchWatchedKey(c->db,key);
+    if (deleted) signalModifiedKey(c->db,key);
     server.dirty += deleted;
     addReplyLongLong(c,deleted);
 }
@@ -1652,7 +1652,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
         zuiClearIterator(&src[i]);
 
     if (dbDelete(c->db,dstkey)) {
-        touchWatchedKey(c->db,dstkey);
+        signalModifiedKey(c->db,dstkey);
         touched = 1;
         server.dirty++;
     }
@@ -1664,7 +1664,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
 
         dbAdd(c->db,dstkey,dstobj);
         addReplyLongLong(c,zsetLength(dstobj));
-        if (!touched) touchWatchedKey(c->db,dstkey);
+        if (!touched) signalModifiedKey(c->db,dstkey);
         server.dirty++;
     } else {
         decrRefCount(dstobj);
