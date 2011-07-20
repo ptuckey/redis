@@ -1032,6 +1032,7 @@ void hlenCommand(redisClient *c);
 void zremrangebyrankCommand(redisClient *c);
 void zunionstoreCommand(redisClient *c);
 void zinterstoreCommand(redisClient *c);
+void zsubsetCommand(redisClient *c);
 void hkeysCommand(redisClient *c);
 void hvalsCommand(redisClient *c);
 void hgetallCommand(redisClient *c);

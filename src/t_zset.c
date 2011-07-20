@@ -1,4 +1,5 @@
 #include "redis.h"
+#include "pqsort.h" /* Partial qsort for SORT+LIMIT */
 
 #include <math.h>
 
@@ -2088,4 +2089,198 @@ void zrankCommand(redisClient *c) {
 
 void zrevrankCommand(redisClient *c) {
     zrankGenericCommand(c, 1);
+}
+
+void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, int offset, int limit) {
+    unsigned long rangelen = 0;
+    void *replylen;
+    double score;
+    int i, j, total = 0;
+
+    replylen = addDeferredMultiBulkLength(c);
+
+    if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
+        unsigned char *eptr;
+
+        for (i = 0, j = 3; i < memberlen; i++, j++) {
+            if ((eptr = zzlFind(zobj->ptr,c->argv[j],&score)) != NULL) {
+                if (total++ < offset)
+                    continue;
+
+                rangelen++;
+                addReplyBulk(c,c->argv[j]);
+                if (withscores)
+                    addReplyDouble(c,score);
+
+                if (total == limit)
+                    break;
+            }
+        }
+    } else if (zobj->encoding == REDIS_ENCODING_SKIPLIST) {
+        zset *zs = zobj->ptr;
+        dictEntry *de;
+
+        for (i = 0, j = 3; i < memberlen; i++, j++) {
+            de = dictFind(zs->dict,c->argv[j]);
+            if (de != NULL) {
+                if (total++ < offset)
+                    continue;
+
+                rangelen++;
+                addReplyBulk(c,c->argv[j]);
+                if (withscores) {
+                    score = *(double*)dictGetEntryVal(de);
+                    addReplyDouble(c,score);
+                }
+
+                if (total == limit)
+                    break;
+            }
+        }
+    } else {
+        redisPanic("Unknown sorted set encoding");
+    }
+
+    if (withscores) rangelen *= 2;
+    setDeferredMultiBulkLength(c,replylen,rangelen);
+}
+
+int zsubsetSortCompare(const void *s1, const void *s2) {
+    const redisSortObject *so1 = s1, *so2 = s2;
+    int cmp;
+
+    if (so1->u.score > so2->u.score) {
+        cmp = 1;
+    } else if (so1->u.score < so2->u.score) {
+        cmp = -1;
+    } else {
+        cmp = compareStringObjects(so1->obj,so2->obj);
+    }
+
+    return server.sort_desc ? -cmp : cmp;
+}
+
+void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int withscores, int offset, int limit) {
+    redisSortObject *vector;
+    double score;
+    int i, j, v = 0;
+    int start, end;
+    unsigned int outputlen;
+
+    vector = zmalloc(sizeof(redisSortObject)*memberlen);
+
+    if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
+        unsigned char *eptr;
+
+        for (i = 0, j = 3; i < memberlen; i++, j++) {
+            if ((eptr = zzlFind(zobj->ptr,c->argv[j],&score)) != NULL) {
+                vector[v].obj = c->argv[j];
+                vector[v].u.score = score;
+                v++;
+            }
+        }
+    } else if (zobj->encoding == REDIS_ENCODING_SKIPLIST) {
+        zset *zs = zobj->ptr;
+        dictEntry *de;
+
+        for (i = 0, j = 3; i < memberlen; i++, j++) {
+            de = dictFind(zs->dict,c->argv[j]);
+            if (de != NULL) {
+                vector[v].obj = c->argv[j];
+                vector[v].u.score = score;
+                v++;
+            }
+        }
+    } else {
+        redisPanic("Unknown sorted set encoding");
+    }
+
+    start = (offset < 0) ? 0 : offset;
+    end = (limit < 0) ? v-1 : start+limit-1;
+    if (start >= v) {
+        start = v-1;
+        end = v-2;
+    }
+    if (end >= v) end = v-1;
+
+    server.sort_desc = (sort == -1) ? 1 : 0;
+
+    if (start != 0 || end != v-1)
+        pqsort(vector,v,sizeof(redisSortObject),zsubsetSortCompare,start,end);
+    else
+        qsort(vector,v,sizeof(redisSortObject),zsubsetSortCompare);
+
+    outputlen = end-start+1;
+    if (withscores) outputlen *= 2;
+    addReplyMultiBulkLen(c,outputlen);
+
+    for (j = start; j <= end; j++) {
+        addReplyBulk(c,vector[j].obj);
+        if (withscores)
+            addReplyDouble(c,vector[j].u.score);
+    }
+
+    zfree(vector);
+}
+
+void zsubsetCommand(redisClient *c) {
+    robj *key = c->argv[1];
+    robj *zobj;
+    int memberlen;
+    int withscores = 0, sort = 0;
+    int offset = 0, limit = -1;
+
+    if ((zobj = lookupKeyWriteOrReply(c,key,shared.emptymultibulk)) == NULL ||
+        checkType(c,zobj,REDIS_ZSET)) return;
+
+    /* expect memberlen input members to be given */
+    memberlen = atoi(c->argv[2]->ptr);
+    if (memberlen < 1) {
+        addReplyError(c,
+            "at least 1 input member is needed for ZSUBSET");
+        return;
+    }
+
+    /* test if the expected number of members would overflow */
+    if (3+memberlen > c->argc) {
+        addReply(c,shared.syntaxerr);
+        return;
+    }
+
+    /* parse optional extra arguments */
+    if (c->argc > 3+memberlen) {
+        int remaining = c->argc - (3+memberlen);
+        int pos = 3+memberlen;
+
+        while (remaining) {
+            if (remaining >= 1 && !strcasecmp(c->argv[pos]->ptr,"withscores")) {
+                pos++; remaining--;
+                withscores = 1;
+            } else if (remaining >=1 && !strcasecmp(c->argv[pos]->ptr,"sort")) {
+                pos++; remaining--;
+                sort = 1;
+                if (remaining >= 1) {
+                    if (!strcasecmp(c->argv[pos]->ptr,"asc")) {
+                        pos++; remaining--;
+                    } else if (!strcasecmp(c->argv[pos]->ptr,"desc")) {
+                        pos++; remaining--;
+                        sort = -1;
+                    }
+                }
+            } else if (remaining >= 3 && !strcasecmp(c->argv[pos]->ptr,"limit")) {
+                offset = atoi(c->argv[pos+1]->ptr);
+                limit = atoi(c->argv[pos+2]->ptr);
+                pos += 3; remaining -= 3;
+            } else {
+                addReply(c,shared.syntaxerr);
+                return;
+            }
+        }
+    }
+
+    if (sort == 0) {
+        zsubsetUnsorted(c, zobj, memberlen, withscores, offset, limit);
+    } else {
+        zsubsetSorted(c, zobj, sort, memberlen, withscores, offset, limit);
+    }
 }
