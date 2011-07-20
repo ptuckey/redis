@@ -1,3 +1,10 @@
+redis (2:2.3.6-1rdio1) unstable; urgency=low
+
+  * New upstream release (2.4.0-rc1)
+  * ZSUBSET command
+
+ -- Manish Singh <manish@rd.io>  Wed, 20 Jul 2011 12:21:26 -0700
+
 redis (2:2.3.5-1rdio2) unstable; urgency=low
 
   * Spin new package from git code.
