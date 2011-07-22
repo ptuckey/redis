@@ -2091,7 +2091,7 @@ void zrevrankCommand(redisClient *c) {
     zrankGenericCommand(c, 1);
 }
 
-void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, int offset, int limit) {
+void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, int offset, int limit, int mincmp, double minval, int maxcmp, double maxval) {
     unsigned long rangelen = 0;
     void *replylen;
     double score;
@@ -2100,10 +2100,12 @@ void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, 
     replylen = addDeferredMultiBulkLength(c);
 
     if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
-        unsigned char *eptr;
-
         for (i = 0, j = 3; i < memberlen; i++, j++) {
-            if ((eptr = zzlFind(zobj->ptr,c->argv[j],&score)) != NULL) {
+            if (zzlFind(zobj->ptr,c->argv[j],&score) != NULL) {
+                if ((mincmp && score < minval) ||
+                    (maxcmp && score > maxval))
+                    continue;
+
                 if (total++ < offset)
                     continue;
 
@@ -2123,15 +2125,19 @@ void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, 
         for (i = 0, j = 3; i < memberlen; i++, j++) {
             de = dictFind(zs->dict,c->argv[j]);
             if (de != NULL) {
+                score = *(double*)dictGetEntryVal(de);
+
+                if ((mincmp && score < minval) ||
+                    (maxcmp && score > maxval))
+                    continue;
+
                 if (total++ < offset)
                     continue;
 
                 rangelen++;
                 addReplyBulk(c,c->argv[j]);
-                if (withscores) {
-                    score = *(double*)dictGetEntryVal(de);
+                if (withscores)
                     addReplyDouble(c,score);
-                }
 
                 if (total == limit)
                     break;
@@ -2160,7 +2166,7 @@ int zsubsetSortCompare(const void *s1, const void *s2) {
     return server.sort_desc ? -cmp : cmp;
 }
 
-void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int withscores, int offset, int limit) {
+void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int withscores, int offset, int limit, int mincmp, double minval, int maxcmp, double maxval) {
     redisSortObject *vector;
     double score;
     int i, j, v = 0;
@@ -2170,10 +2176,12 @@ void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int with
     vector = zmalloc(sizeof(redisSortObject)*memberlen);
 
     if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
-        unsigned char *eptr;
-
         for (i = 0, j = 3; i < memberlen; i++, j++) {
-            if ((eptr = zzlFind(zobj->ptr,c->argv[j],&score)) != NULL) {
+            if (zzlFind(zobj->ptr,c->argv[j],&score) != NULL) {
+                if ((mincmp && score < minval) ||
+                    (maxcmp && score > maxval))
+                    continue;
+
                 vector[v].obj = c->argv[j];
                 vector[v].u.score = score;
                 v++;
@@ -2186,6 +2194,12 @@ void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int with
         for (i = 0, j = 3; i < memberlen; i++, j++) {
             de = dictFind(zs->dict,c->argv[j]);
             if (de != NULL) {
+                score = *(double*)dictGetEntryVal(de);
+
+                if ((mincmp && score < minval) ||
+                    (maxcmp && score > maxval))
+                    continue;
+
                 vector[v].obj = c->argv[j];
                 vector[v].u.score = score;
                 v++;
@@ -2228,7 +2242,9 @@ void zsubsetCommand(redisClient *c) {
     robj *zobj;
     int memberlen;
     int withscores = 0, sort = 0;
+    int mincmp = 0, maxcmp = 0;
     int offset = 0, limit = -1;
+    double minval = 0.0, maxval = 0.0;
 
     if ((zobj = lookupKeyWriteOrReply(c,key,shared.emptymultibulk)) == NULL ||
         checkType(c,zobj,REDIS_ZSET)) return;
@@ -2256,7 +2272,7 @@ void zsubsetCommand(redisClient *c) {
             if (remaining >= 1 && !strcasecmp(c->argv[pos]->ptr,"withscores")) {
                 pos++; remaining--;
                 withscores = 1;
-            } else if (remaining >=1 && !strcasecmp(c->argv[pos]->ptr,"sort")) {
+            } else if (remaining >= 1 && !strcasecmp(c->argv[pos]->ptr,"sort")) {
                 pos++; remaining--;
                 sort = 1;
                 if (remaining >= 1) {
@@ -2267,6 +2283,18 @@ void zsubsetCommand(redisClient *c) {
                         sort = -1;
                     }
                 }
+            } else if (remaining >= 2 && !strcasecmp(c->argv[pos]->ptr,"min")) {
+                if (getDoubleFromObjectOrReply(c,c->argv[pos+1],&minval,
+                            "min value is not a double") != REDIS_OK)
+                    return;
+                mincmp = 1;
+                pos += 2; remaining -= 2;
+            } else if (remaining >= 2 && !strcasecmp(c->argv[pos]->ptr,"max")) {
+                if (getDoubleFromObjectOrReply(c,c->argv[pos+1],&maxval,
+                            "max value is not a double") != REDIS_OK)
+                    return;
+                maxcmp = 1;
+                pos += 2; remaining -= 2;
             } else if (remaining >= 3 && !strcasecmp(c->argv[pos]->ptr,"limit")) {
                 offset = atoi(c->argv[pos+1]->ptr);
                 limit = atoi(c->argv[pos+2]->ptr);
@@ -2279,8 +2307,8 @@ void zsubsetCommand(redisClient *c) {
     }
 
     if (sort == 0) {
-        zsubsetUnsorted(c, zobj, memberlen, withscores, offset, limit);
+        zsubsetUnsorted(c, zobj, memberlen, withscores, offset, limit, mincmp, minval, maxcmp, maxval);
     } else {
-        zsubsetSorted(c, zobj, sort, memberlen, withscores, offset, limit);
+        zsubsetSorted(c, zobj, sort, memberlen, withscores, offset, limit, mincmp, minval, maxcmp, maxval);
     }
 }
