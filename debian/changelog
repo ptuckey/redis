@@ -1,7 +1,13 @@
+redis (2:2.3.7-1rdio2) unstable; urgency=low
+
+  * ZSUBSET with DEFAULTSCORE
+
+ -- Manish Singh <manish@rd.io>  Thu, 28 Jul 2011 05:31:13 -0700
+
 redis (2:2.3.7-1rdio1) unstable; urgency=low
 
   * New upstream release (2.4.0-rc4)
-  * ZSUBSET with MAX/MAX
+  * ZSUBSET with MIN/MAX
 
  -- Manish Singh <manish@rd.io>  Fri, 22 Jul 2011 12:54:25 -0700
 
