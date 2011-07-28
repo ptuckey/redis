@@ -2091,7 +2091,7 @@ void zrevrankCommand(redisClient *c) {
     zrankGenericCommand(c, 1);
 }
 
-void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, int offset, int limit, int mincmp, double minval, int maxcmp, double maxval) {
+void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, int offset, int limit, int defscore, double defscoreval, int mincmp, double minval, int maxcmp, double maxval) {
     unsigned long rangelen = 0;
     void *replylen;
     double score;
@@ -2101,22 +2101,27 @@ void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, 
 
     if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
         for (i = 0, j = 3; i < memberlen; i++, j++) {
-            if (zzlFind(zobj->ptr,c->argv[j],&score) != NULL) {
-                if ((mincmp && score < minval) ||
-                    (maxcmp && score > maxval))
+            if (zzlFind(zobj->ptr,c->argv[j],&score) == NULL) {
+                if (defscore)
+                    score = defscoreval;
+                else
                     continue;
-
-                if (total++ < offset)
-                    continue;
-
-                rangelen++;
-                addReplyBulk(c,c->argv[j]);
-                if (withscores)
-                    addReplyDouble(c,score);
-
-                if (total == limit)
-                    break;
             }
+
+            if ((mincmp && score < minval) ||
+                (maxcmp && score > maxval))
+                continue;
+
+            if (total++ < offset)
+                continue;
+
+            rangelen++;
+            addReplyBulk(c,c->argv[j]);
+            if (withscores)
+                addReplyDouble(c,score);
+
+            if (limit > -1 && total >= limit)
+                break;
         }
     } else if (zobj->encoding == REDIS_ENCODING_SKIPLIST) {
         zset *zs = zobj->ptr;
@@ -2126,22 +2131,25 @@ void zsubsetUnsorted(redisClient *c, robj *zobj, int memberlen, int withscores, 
             de = dictFind(zs->dict,c->argv[j]);
             if (de != NULL) {
                 score = *(double*)dictGetEntryVal(de);
+            } else if (defscore) {
+                score = defscoreval;
+            } else
+                continue;
 
-                if ((mincmp && score < minval) ||
-                    (maxcmp && score > maxval))
-                    continue;
+            if ((mincmp && score < minval) ||
+                (maxcmp && score > maxval))
+                continue;
 
-                if (total++ < offset)
-                    continue;
+            if (total++ < offset)
+                continue;
 
-                rangelen++;
-                addReplyBulk(c,c->argv[j]);
-                if (withscores)
-                    addReplyDouble(c,score);
+            rangelen++;
+            addReplyBulk(c,c->argv[j]);
+            if (withscores)
+                addReplyDouble(c,score);
 
-                if (total == limit)
-                    break;
-            }
+            if (limit > -1 && total >= limit)
+                break;
         }
     } else {
         redisPanic("Unknown sorted set encoding");
@@ -2166,7 +2174,7 @@ int zsubsetSortCompare(const void *s1, const void *s2) {
     return server.sort_desc ? -cmp : cmp;
 }
 
-void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int withscores, int offset, int limit, int mincmp, double minval, int maxcmp, double maxval) {
+void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int withscores, int offset, int limit, int defscore, double defscoreval, int mincmp, double minval, int maxcmp, double maxval) {
     redisSortObject *vector;
     double score;
     int i, j, v = 0;
@@ -2177,15 +2185,20 @@ void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int with
 
     if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
         for (i = 0, j = 3; i < memberlen; i++, j++) {
-            if (zzlFind(zobj->ptr,c->argv[j],&score) != NULL) {
-                if ((mincmp && score < minval) ||
-                    (maxcmp && score > maxval))
+            if (zzlFind(zobj->ptr,c->argv[j],&score) == NULL) {
+                if (defscore)
+                    score = defscoreval;
+                else
                     continue;
-
-                vector[v].obj = c->argv[j];
-                vector[v].u.score = score;
-                v++;
             }
+
+            if ((mincmp && score < minval) ||
+                (maxcmp && score > maxval))
+                continue;
+
+            vector[v].obj = c->argv[j];
+            vector[v].u.score = score;
+            v++;
         }
     } else if (zobj->encoding == REDIS_ENCODING_SKIPLIST) {
         zset *zs = zobj->ptr;
@@ -2193,17 +2206,20 @@ void zsubsetSorted(redisClient *c, robj *zobj, int sort, int memberlen, int with
 
         for (i = 0, j = 3; i < memberlen; i++, j++) {
             de = dictFind(zs->dict,c->argv[j]);
-            if (de != NULL) {
+            if (de != NULL)
                 score = *(double*)dictGetEntryVal(de);
+            else if (defscore)
+                score = defscoreval;
+            else
+                continue;
 
-                if ((mincmp && score < minval) ||
-                    (maxcmp && score > maxval))
-                    continue;
+            if ((mincmp && score < minval) ||
+                (maxcmp && score > maxval))
+                continue;
 
-                vector[v].obj = c->argv[j];
-                vector[v].u.score = score;
-                v++;
-            }
+            vector[v].obj = c->argv[j];
+            vector[v].u.score = score;
+            v++;
         }
     } else {
         redisPanic("Unknown sorted set encoding");
@@ -2242,9 +2258,9 @@ void zsubsetCommand(redisClient *c) {
     robj *zobj;
     int memberlen;
     int withscores = 0, sort = 0;
-    int mincmp = 0, maxcmp = 0;
     int offset = 0, limit = -1;
-    double minval = 0.0, maxval = 0.0;
+    int defscore = 0, mincmp = 0, maxcmp = 0;
+    double defscoreval = 0.0, minval = 0.0, maxval = 0.0;
 
     if ((zobj = lookupKeyWriteOrReply(c,key,shared.emptymultibulk)) == NULL ||
         checkType(c,zobj,REDIS_ZSET)) return;
@@ -2283,6 +2299,12 @@ void zsubsetCommand(redisClient *c) {
                         sort = -1;
                     }
                 }
+            } else if (remaining >= 2 && !strcasecmp(c->argv[pos]->ptr,"defaultscore")) {
+                if (getDoubleFromObjectOrReply(c,c->argv[pos+1],&defscoreval,
+                            "defaultscore value is not a double") != REDIS_OK)
+                    return;
+                defscore = 1;
+                pos += 2; remaining -= 2;
             } else if (remaining >= 2 && !strcasecmp(c->argv[pos]->ptr,"min")) {
                 if (getDoubleFromObjectOrReply(c,c->argv[pos+1],&minval,
                             "min value is not a double") != REDIS_OK)
@@ -2307,8 +2329,8 @@ void zsubsetCommand(redisClient *c) {
     }
 
     if (sort == 0) {
-        zsubsetUnsorted(c, zobj, memberlen, withscores, offset, limit, mincmp, minval, maxcmp, maxval);
+        zsubsetUnsorted(c, zobj, memberlen, withscores, offset, limit, defscore, defscoreval, mincmp, minval, maxcmp, maxval);
     } else {
-        zsubsetSorted(c, zobj, sort, memberlen, withscores, offset, limit, mincmp, minval, maxcmp, maxval);
+        zsubsetSorted(c, zobj, sort, memberlen, withscores, offset, limit, defscore, defscoreval, mincmp, minval, maxcmp, maxval);
     }
 }
