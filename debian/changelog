@@ -1,3 +1,9 @@
+redis (2:2.3.8-1rdio1) unstable; urgency=low
+
+  * New upstream release (2.4.0-rc5)
+
+ -- Manish Singh <manish@rd.io>  Sun, 31 Jul 2011 13:29:29 -0700
+
 redis (2:2.3.7-1rdio2) unstable; urgency=low
 
   * ZSUBSET with DEFAULTSCORE
