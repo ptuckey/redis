@@ -1,3 +1,9 @@
+redis (2:2.4.0~rc6-1rdio1) unstable; urgency=low
+
+  * New upstream release (2.4.0-rc6)
+
+ -- Manish Singh <manish@rd.io>  Tue,  9 Aug 2011 10:15:47 -0700
+
 redis (2:2.4.0~rc5-1rdio1) unstable; urgency=low
 
   * Resync with upstream packaging.
