@@ -29,6 +29,7 @@
 
 #include "redis.h"
 #include "slowlog.h"
+#include "bio.h"
 
 #ifdef HAVE_BACKTRACE
 #include <execinfo.h>
@@ -533,6 +534,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * in objects at every object access, and accuracy is not needed.
      * To access a global var is faster than calling time(NULL) */
     server.unixtime = time(NULL);
+
     /* We have just 22 bits per object for LRU information.
      * So we use an (eventually wrapping) LRU clock with 10 seconds resolution.
      * 2^22 bits with 10 seconds resoluton is more or less 1.5 years.
@@ -966,6 +968,7 @@ void initServer() {
 
     if (server.vm_enabled) vmInit();
     slowlogInit();
+    bioInit();
     srand(time(NULL)^getpid());
 }
 
@@ -1009,9 +1012,9 @@ void call(redisClient *c) {
     duration = ustime()-start;
     slowlogPushEntryIfNeeded(c->argv,c->argc,duration);
 
-    if (server.appendonly && dirty)
+    if (server.appendonly && dirty > 0)
         feedAppendOnlyFile(c->cmd,c->db->id,c->argv,c->argc);
-    if ((dirty || c->cmd->flags & REDIS_CMD_FORCE_REPLICATION) &&
+    if ((dirty > 0 || c->cmd->flags & REDIS_CMD_FORCE_REPLICATION) &&
         listLength(server.slaves))
         replicationFeedSlaves(server.slaves,c->db->id,c->argv,c->argc);
     if (listLength(server.monitors))
