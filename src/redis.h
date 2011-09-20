@@ -428,6 +428,7 @@ struct redisServer {
     time_t lastfsync;
     int appendfd;
     int appendseldb;
+    time_t aof_flush_postponed_start;
     char *pidfile;
     pid_t bgsavechildpid;
     pid_t bgrewritechildpid;
@@ -796,7 +797,7 @@ void backgroundSaveDoneHandler(int statloc);
 int getObjectSaveType(robj *o);
 
 /* AOF persistence */
-void flushAppendOnlyFile(void);
+void flushAppendOnlyFile(int force);
 void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc);
 void aofRemoveTempFile(pid_t childpid);
 int rewriteAppendOnlyFileBackground(void);
