@@ -38,6 +38,7 @@
 /* Static server configuration */
 #define REDIS_SERVERPORT        6379    /* TCP port */
 #define REDIS_MAXIDLETIME       0       /* default client timeout: infinite */
+#define REDIS_MAX_QUERYBUF_LEN  (1024*1024*1024) /* 1GB max query buffer. */
 #define REDIS_IOBUF_LEN         (1024*16)
 #define REDIS_LOADBUF_LEN       1024
 #define REDIS_DEFAULT_DBNUM     16
@@ -48,7 +49,7 @@
 #define REDIS_REQUEST_MAX_SIZE (1024*1024*256) /* max bytes in inline command */
 #define REDIS_SHARED_INTEGERS 10000
 #define REDIS_REPLY_CHUNK_BYTES (5*1500) /* 5 TCP packets with default MTU */
-#define REDIS_MAX_LOGMSG_LEN    1024 /* Default maximum length of syslog messages */
+#define REDIS_MAX_LOGMSG_LEN    4096 /* Default maximum length of syslog messages */
 #define REDIS_AUTO_AOFREWRITE_PERC  100
 #define REDIS_AUTO_AOFREWRITE_MIN_SIZE (1024*1024)
 #define REDIS_SLOWLOG_LOG_SLOWER_THAN 10000
@@ -418,6 +419,7 @@ struct redisServer {
     /* Configuration */
     int verbosity;
     int maxidletime;
+    size_t client_max_querybuf_len;
     int dbnum;
     int daemonize;
     int appendonly;
@@ -700,6 +702,7 @@ void addReplyMultiBulkLen(redisClient *c, long length);
 void *dupClientReplyValue(void *o);
 void getClientsMaxBuffers(unsigned long *longest_output_list,
                           unsigned long *biggest_input_buffer);
+sds getClientInfoString(redisClient *client);
 void rewriteClientCommandVector(redisClient *c, int argc, ...);
 
 #ifdef __GNUC__
