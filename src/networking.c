@@ -30,7 +30,7 @@ redisClient *createClient(int fd) {
     c->reqtype = 0;
     c->argc = 0;
     c->argv = NULL;
-    c->cmd = NULL;
+    c->cmd = c->lastcmd = NULL;
     c->multibulklen = 0;
     c->bulklen = -1;
     c->sentlen = 0;
@@ -698,6 +698,12 @@ int processInlineBuffer(redisClient *c) {
 /* Helper function. Trims query buffer to make the function that processes
  * multi bulk requests idempotent. */
 static void setProtocolError(redisClient *c, int pos) {
+    if (server.verbosity >= REDIS_VERBOSE) {
+        sds client = getClientInfoString(c);
+        redisLog(REDIS_VERBOSE,
+            "Protocol error from client: %s", client);
+        sdsfree(client);
+    }
     c->flags |= REDIS_CLOSE_AFTER_REPLY;
     c->querybuf = sdsrange(c->querybuf,pos,-1);
 }
@@ -925,7 +931,7 @@ sds getClientInfoString(redisClient *client) {
     if (emask & AE_WRITABLE) *p++ = 'w';
     *p = '\0';
     return sdscatprintf(sdsempty(),
-        "addr=%s:%d fd=%d idle=%ld flags=%s db=%d sub=%d psub=%d qbuf=%lu obl=%lu oll=%lu events=%s",
+        "addr=%s:%d fd=%d idle=%ld flags=%s db=%d sub=%d psub=%d qbuf=%lu obl=%lu oll=%lu events=%s cmd=%s",
         ip,port,client->fd,
         (long)(now - client->lastinteraction),
         flags,
@@ -935,7 +941,23 @@ sds getClientInfoString(redisClient *client) {
         (unsigned long) sdslen(client->querybuf),
         (unsigned long) client->bufpos,
         (unsigned long) listLength(client->reply),
-        events);
+        events,
+        client->lastcmd ? client->lastcmd->name : "NULL");
+}
+
+sds getAllClientsInfoString(void) {
+    listNode *ln;
+    listIter li;
+    redisClient *client;
+    sds o = sdsempty();
+
+    listRewind(server.clients,&li);
+    while ((ln = listNext(&li)) != NULL) {
+        client = listNodeValue(ln);
+        o = sdscatsds(o,getClientInfoString(client));
+        o = sdscatlen(o,"\n",1);
+    }
+    return o;
 }
 
 void clientCommand(redisClient *c) {
@@ -944,14 +966,7 @@ void clientCommand(redisClient *c) {
     redisClient *client;
 
     if (!strcasecmp(c->argv[1]->ptr,"list") && c->argc == 2) {
-        sds o = sdsempty();
-
-        listRewind(server.clients,&li);
-        while ((ln = listNext(&li)) != NULL) {
-            client = listNodeValue(ln);
-            o = sdscatsds(o,getClientInfoString(client));
-            o = sdscatlen(o,"\n",1);
-        }
+        sds o = getAllClientsInfoString();
         addReplyBulkCBuffer(c,o,sdslen(o));
         sdsfree(o);
     } else if (!strcasecmp(c->argv[1]->ptr,"kill") && c->argc == 3) {

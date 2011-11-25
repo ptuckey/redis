@@ -236,6 +236,7 @@
 #define redisPanic(_e) _redisPanic(#_e,__FILE__,__LINE__),_exit(1)
 void _redisAssert(char *estr, char *file, int line);
 void _redisPanic(char *msg, char *file, int line);
+void bugReportStart(void);
 
 /*-----------------------------------------------------------------------------
  * Data types
@@ -332,7 +333,7 @@ typedef struct redisClient {
     sds querybuf;
     int argc;
     robj **argv;
-    struct redisCommand *cmd;
+    struct redisCommand *cmd, *lastcmd;
     int reqtype;
     int multibulklen;       /* number of multi bulk arguments left to read */
     long bulklen;           /* length of bulk argument in multi bulk request */
@@ -534,6 +535,11 @@ struct redisServer {
     /* Misc */
     unsigned lruclock:22;        /* clock incrementing every minute, for LRU */
     unsigned lruclock_padding:10;
+    /* Assert & bug reportign */
+    char *assert_failed;
+    char *assert_file;
+    int assert_line;
+    int bug_report_start; /* True if bug report header already logged. */
 };
 
 typedef struct pubsubPattern {
@@ -703,6 +709,7 @@ void *dupClientReplyValue(void *o);
 void getClientsMaxBuffers(unsigned long *longest_output_list,
                           unsigned long *biggest_input_buffer);
 sds getClientInfoString(redisClient *client);
+sds getAllClientsInfoString(void);
 void rewriteClientCommandVector(redisClient *c, int argc, ...);
 
 #ifdef __GNUC__
