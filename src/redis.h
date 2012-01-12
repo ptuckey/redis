@@ -1019,6 +1019,8 @@ void debugCommand(redisClient *c);
 void msetCommand(redisClient *c);
 void msetnxCommand(redisClient *c);
 void zaddCommand(redisClient *c);
+void zaddcapCommand(redisClient *c);
+void zaddcaprevCommand(redisClient *c);
 void zincrbyCommand(redisClient *c);
 void zrangeCommand(redisClient *c);
 void zrangebyscoreCommand(redisClient *c);

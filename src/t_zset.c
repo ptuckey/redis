@@ -811,17 +811,21 @@ void zsetConvert(robj *zobj, int encoding) {
  *----------------------------------------------------------------------------*/
 
 /* This generic command implements both ZADD and ZINCRBY. */
-void zaddGenericCommand(redisClient *c, int incr) {
+void zaddGenericCommand(redisClient *c, int incr, int cap) {
     static char *nanerr = "resulting score is not a number (NaN)";
     robj *key = c->argv[1];
     robj *ele;
     robj *zobj;
     robj *curobj;
     double score = 0, *scores, curscore = 0.0;
-    int j, elements = (c->argc-2)/2;
+    int j, elements = (c->argc-(cap?3:2))/2;
     int added = 0;
+    long capLen = 0;
 
-    if (c->argc % 2) {
+    if (cap && getLongFromObjectOrReply(c, c->argv[2], &capLen, NULL) != REDIS_OK)
+        return;
+
+    if ((c->argc + (cap?1:0)) % 2 || (cap && capLen < 1)) {
         addReply(c,shared.syntaxerr);
         return;
     }
@@ -831,7 +835,7 @@ void zaddGenericCommand(redisClient *c, int incr) {
      * either execute fully or nothing at all. */
     scores = zmalloc(sizeof(double)*elements);
     for (j = 0; j < elements; j++) {
-        if (getDoubleFromObjectOrReply(c,c->argv[2+j*2],&scores[j],NULL)
+        if (getDoubleFromObjectOrReply(c,c->argv[(cap?3:2)+j*2],&scores[j],NULL)
             != REDIS_OK)
         {
             zfree(scores);
@@ -865,7 +869,7 @@ void zaddGenericCommand(redisClient *c, int incr) {
             unsigned char *eptr;
 
             /* Prefer non-encoded element when dealing with ziplists. */
-            ele = c->argv[3+j*2];
+            ele = c->argv[(cap?4:3)+j*2];
             if ((eptr = zzlFind(zobj->ptr,ele,&curscore)) != NULL) {
                 if (incr) {
                     score += curscore;
@@ -904,7 +908,7 @@ void zaddGenericCommand(redisClient *c, int incr) {
             zskiplistNode *znode;
             dictEntry *de;
 
-            ele = c->argv[3+j*2] = tryObjectEncoding(c->argv[3+j*2]);
+            ele = c->argv[(cap?4:3)+j*2] = tryObjectEncoding(c->argv[(cap?4:3)+j*2]);
             de = dictFind(zs->dict,ele);
             if (de != NULL) {
                 curobj = dictGetEntryKey(de);
@@ -948,6 +952,31 @@ void zaddGenericCommand(redisClient *c, int incr) {
         }
     }
     zfree(scores);
+
+    if (cap) {
+        unsigned int llen = zsetLength(zobj);
+        long capExtra = (long)llen-capLen;
+        if (capExtra > 0) {
+            unsigned long deleted=0;
+            /* Correct for 1-based rank. */
+            unsigned int start=(cap==1?1:llen-capExtra+1), end=(cap==1?capExtra:llen);
+            if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
+                zobj->ptr = zzlDeleteRangeByRank(zobj->ptr,start,end,&deleted);
+                if (zzlLength(zobj->ptr) == 0) dbDelete(c->db,key);
+            } else if (zobj->encoding == REDIS_ENCODING_SKIPLIST) {
+                zset *zs = zobj->ptr;
+                deleted = zslDeleteRangeByRank(zs->zsl,start,end,zs->dict);
+                if (htNeedsResize(zs->dict)) dictResize(zs->dict);
+                if (dictSize(zs->dict) == 0) dbDelete(c->db,key);
+            } else {
+                redisPanic("Unknown sorted set encoding");
+            }
+
+            if (deleted) signalModifiedKey(c->db,key);
+            server.dirty += deleted;
+        }
+    }
+
     if (incr) /* ZINCRBY */
         addReplyDouble(c,score);
     else /* ZADD */
@@ -955,11 +984,19 @@ void zaddGenericCommand(redisClient *c, int incr) {
 }
 
 void zaddCommand(redisClient *c) {
-    zaddGenericCommand(c,0);
+    zaddGenericCommand(c,0,0);
+}
+
+void zaddcapCommand(redisClient *c) {
+    zaddGenericCommand(c,0,1);
+}
+
+void zaddcaprevCommand(redisClient *c) {
+    zaddGenericCommand(c,0,2);
 }
 
 void zincrbyCommand(redisClient *c) {
-    zaddGenericCommand(c,1);
+    zaddGenericCommand(c,1,0);
 }
 
 void zremCommand(redisClient *c) {
