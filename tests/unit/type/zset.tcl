@@ -81,6 +81,68 @@ start_server {tags {"zset"}} {
             assert_equal 0 [r zcard zdoesntexist]
         }
 
+        test {ZSETCAP - Invalid negative cap} {
+            assert_error "*ERR*syntax*" {r zaddcap myzset -1 0 abc}
+        }
+
+        test {ZSETCAP - Invalid zero cap} {
+            assert_error "*ERR*syntax*" {r zaddcap myzset 0 0 abc}
+        }
+
+        test {ZSETCAPREV - Invalid negative cap} {
+            assert_error "*ERR*syntax*" {r zaddcaprev myzset -1 0 abc}
+        }
+
+        test {ZSETCAPREV - Invalid zero cap} {
+            assert_error "*ERR*syntax*" {r zaddcaprev myzset 0 0 abc}
+        }
+
+        test "ZSETCAP - Generic - $encoding" {
+            r del ztmp
+            r zaddcap ztmp 2 10 x
+            r zaddcap ztmp 2 20 y
+            r zaddcap ztmp 2 30 z
+            assert_equal {y z} [r zrange ztmp 0 -1]
+
+            r zaddcap ztmp 2 10 xx
+            assert_equal {y z} [r zrange ztmp 0 -1]
+
+            r zaddcap ztmp 2 15 z
+            assert_equal {z y} [r zrange ztmp 0 -1]
+            
+            r zaddcap ztmp 2 25 yy
+            assert_equal {y yy} [r zrange ztmp 0 -1]
+        }
+
+        test "ZSETCAPREV - Generic - $encoding" {
+            r del ztmp
+            r zaddcaprev ztmp 2 10 x
+            r zaddcaprev ztmp 2 20 y
+            r zaddcaprev ztmp 2 30 z
+            assert_equal {x y} [r zrange ztmp 0 -1]
+
+            r zaddcaprev ztmp 2 5 xx
+            assert_equal {xx x} [r zrange ztmp 0 -1]
+
+            r zaddcaprev ztmp 2 15 xx
+            assert_equal {x xx} [r zrange ztmp 0 -1]
+            
+            r zaddcaprev ztmp 2 5 yy
+            assert_equal {yy x} [r zrange ztmp 0 -1]
+        }
+
+        test "ZSETCAP - Variadic version - $encoding" {
+            r del ztmp
+            r zaddcap ztmp 2 10 x 20 y 30 z
+            assert_equal {y z} [r zrange ztmp 0 -1]
+        }
+
+        test "ZSETCAPREV - Variadic version - $encoding" {
+            r del ztmp
+            r zaddcaprev ztmp 2 30 z 20 y 10 x
+            assert_equal {x y} [r zrange ztmp 0 -1]
+        }
+
         test "ZREM removes key after last element is removed" {
             r del ztmp
             r zadd ztmp 10 x
