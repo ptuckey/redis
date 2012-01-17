@@ -353,54 +353,76 @@ void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
         redisLog(REDIS_NOTICE,
             "MASTER <-> SLAVE sync: receiving %ld bytes from master",
             server.repl_transfer_left);
-        return;
+
+        if (server.repl_transfer_left != 0) {
+            return;
+        }
     }
 
-    /* Read bulk data */
-    readlen = (server.repl_transfer_left < (signed)sizeof(buf)) ?
-        server.repl_transfer_left : (signed)sizeof(buf);
-    nread = read(fd,buf,readlen);
-    if (nread <= 0) {
-        redisLog(REDIS_WARNING,"I/O error trying to sync with MASTER: %s",
-            (nread == -1) ? strerror(errno) : "connection lost");
-        replicationAbortSyncTransfer();
-        return;
+    if (server.repl_transfer_left != 0) {
+        /* Read bulk data */
+        readlen = (server.repl_transfer_left < (signed)sizeof(buf)) ?
+            server.repl_transfer_left : (signed)sizeof(buf);
+        nread = read(fd,buf,readlen);
+        if (nread <= 0) {
+            redisLog(REDIS_WARNING,"I/O error trying to sync with MASTER: %s",
+                (nread == -1) ? strerror(errno) : "connection lost");
+            replicationAbortSyncTransfer();
+            return;
+        }
+        server.repl_transfer_lastio = time(NULL);
+        if (write(server.repl_transfer_fd,buf,nread) != nread) {
+            redisLog(REDIS_WARNING,"Write error or short write writing to the DB dump file needed for MASTER <-> SLAVE synchrnonization: %s", strerror(errno));
+            goto error;
+        }
+        server.repl_transfer_left -= nread;
     }
-    server.repl_transfer_lastio = time(NULL);
-    if (write(server.repl_transfer_fd,buf,nread) != nread) {
-        redisLog(REDIS_WARNING,"Write error or short write writing to the DB dump file needed for MASTER <-> SLAVE synchrnonization: %s", strerror(errno));
-        goto error;
-    }
-    server.repl_transfer_left -= nread;
+
     /* Check if the transfer is now complete */
     if (server.repl_transfer_left == 0) {
-        if (rename(server.repl_transfer_tmpfile,server.dbfilename) == -1) {
-            redisLog(REDIS_WARNING,"Failed trying to rename the temp DB into dump.rdb in MASTER <-> SLAVE synchronization: %s", strerror(errno));
-            replicationAbortSyncTransfer();
-            return;
+        struct redis_stat buf;
+        redis_fstat(server.repl_transfer_fd, &buf);
+        if (buf.st_size) {
+            if (rename(server.repl_transfer_tmpfile,server.dbfilename) == -1) {
+                redisLog(REDIS_WARNING,"Failed trying to rename the temp DB into dump.rdb in MASTER <-> SLAVE synchronization: %s", strerror(errno));
+                replicationAbortSyncTransfer();
+                return;
+            }
+            redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Loading DB in memory");
+            emptyDb();
+            /* Before loading the DB into memory we need to delete the readable
+             * handler, otherwise it will get called recursively since
+             * rdbLoad() will call the event loop to process events from time to
+             * time for non blocking loading. */
+            aeDeleteFileEvent(server.el,server.repl_transfer_s,AE_READABLE);
+            if (rdbLoad(server.dbfilename) != REDIS_OK) {
+                redisLog(REDIS_WARNING,"Failed trying to load the MASTER synchronization DB from disk");
+                replicationAbortSyncTransfer();
+                return;
+            }
+            /* Final setup of the connected slave <- master link */
+            zfree(server.repl_transfer_tmpfile);
+            close(server.repl_transfer_fd);
+            server.master = createClient(server.repl_transfer_s);
+            server.master->flags |= REDIS_MASTER;
+            server.master->authenticated = 1;
+            server.replstate = REDIS_REPL_CONNECTED;
+            redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Finished with success");
+            /* Rewrite the AOF file now that the dataset changed. */
+            if (server.appendonly) rewriteAppendOnlyFileBackground();
         }
-        redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Loading DB in memory");
-        emptyDb();
-        /* Before loading the DB into memory we need to delete the readable
-         * handler, otherwise it will get called recursively since
-         * rdbLoad() will call the event loop to process events from time to
-         * time for non blocking loading. */
-        aeDeleteFileEvent(server.el,server.repl_transfer_s,AE_READABLE);
-        if (rdbLoad(server.dbfilename) != REDIS_OK) {
-            redisLog(REDIS_WARNING,"Failed trying to load the MASTER synchronization DB from disk");
-            replicationAbortSyncTransfer();
-            return;
+        else {
+            aeDeleteFileEvent(server.el,server.repl_transfer_s,AE_READABLE);
+            /* Final setup of the connected slave <- master link */
+            close(server.repl_transfer_fd);
+            remove(server.repl_transfer_tmpfile);
+            zfree(server.repl_transfer_tmpfile);
+            server.master = createClient(server.repl_transfer_s);
+            server.master->flags |= REDIS_MASTER;
+            server.master->authenticated = 1;
+            server.replstate = REDIS_REPL_CONNECTED;
+            redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Fast synchronization finished with success");
         }
-        /* Final setup of the connected slave <- master link */
-        zfree(server.repl_transfer_tmpfile);
-        close(server.repl_transfer_fd);
-        server.master = createClient(server.repl_transfer_s);
-        server.master->flags |= REDIS_MASTER;
-        server.master->authenticated = 1;
-        server.replstate = REDIS_REPL_CONNECTED;
-        redisLog(REDIS_NOTICE, "MASTER <-> SLAVE sync: Finished with success");
-        /* Rewrite the AOF file now that the dataset changed. */
-        if (server.appendonly) rewriteAppendOnlyFileBackground();
     }
 
     return;
@@ -455,6 +477,7 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     /* Issue the SYNC command */
     if (syncWrite(fd,"SYNC \r\n",7,server.repl_syncio_timeout) == -1) {
+    //if (syncWrite(fd,"SYNCFAST \r\n",11,server.repl_syncio_timeout) == -1) {
         redisLog(REDIS_WARNING,"I/O error writing to MASTER: %s",
             strerror(errno));
         goto error;
