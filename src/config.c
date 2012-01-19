@@ -231,6 +231,10 @@ void loadServerConfig(char *filename) {
             if ((server.appendonly = yesnotoi(argv[1])) == -1) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"syncfast") && argc == 2) {
+            if ((server.syncfast = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"appendfilename") && argc == 2) {
             zfree(server.appendfilename);
             server.appendfilename = zstrdup(argv[1]);

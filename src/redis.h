@@ -426,6 +426,7 @@ struct redisServer {
     int dbnum;
     int daemonize;
     int appendonly;
+    int syncfast;
     int appendfsync;
     int no_appendfsync_on_rewrite;
     int auto_aofrewrite_perc;       /* Rewrite AOF if % growth is > M and... */
