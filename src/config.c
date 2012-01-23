@@ -231,6 +231,10 @@ void loadServerConfig(char *filename) {
             if ((server.appendonly = yesnotoi(argv[1])) == -1) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"syncfast") && argc == 2) {
+            if ((server.syncfast = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"appendfilename") && argc == 2) {
             zfree(server.appendfilename);
             server.appendfilename = zstrdup(argv[1]);
@@ -442,6 +446,12 @@ void configSetCommand(redisClient *c) {
                 }
             }
         }
+    } else if (!strcasecmp(c->argv[2]->ptr,"syncfast")) {
+        int new = yesnotoi(o->ptr);
+        if (new == -1) goto badfmt;
+        if (server.syncfast != new) {
+            server.syncfast = new;
+        }
     } else if (!strcasecmp(c->argv[2]->ptr,"auto-aof-rewrite-percentage")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll < 0) goto badfmt;
         server.auto_aofrewrite_perc = ll;
@@ -615,6 +625,11 @@ void configGetCommand(redisClient *c) {
     if (stringmatch(pattern,"appendonly",0)) {
         addReplyBulkCString(c,"appendonly");
         addReplyBulkCString(c,server.appendonly ? "yes" : "no");
+        matches++;
+    }
+    if (stringmatch(pattern,"syncfast",0)) {
+        addReplyBulkCString(c,"syncfast");
+        addReplyBulkCString(c,server.syncfast ? "yes" : "no");
         matches++;
     }
     if (stringmatch(pattern,"no-appendfsync-on-rewrite",0)) {
