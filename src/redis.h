@@ -426,6 +426,7 @@ struct redisServer {
     int dbnum;
     int daemonize;
     int appendonly;
+    int syncfast;
     int appendfsync;
     int no_appendfsync_on_rewrite;
     int auto_aofrewrite_perc;       /* Rewrite AOF if % growth is > M and... */
@@ -1002,6 +1003,7 @@ void sunionstoreCommand(redisClient *c);
 void sdiffCommand(redisClient *c);
 void sdiffstoreCommand(redisClient *c);
 void syncCommand(redisClient *c);
+void syncfastCommand(redisClient *c);
 void flushdbCommand(redisClient *c);
 void flushallCommand(redisClient *c);
 void sortCommand(redisClient *c);
