@@ -804,6 +804,7 @@ void createSharedObjects(void) {
 }
 
 void initServerConfig() {
+    server.arch_bits = (sizeof(long) == 8) ? 64 : 32;
     server.port = REDIS_SERVERPORT;
     server.bindaddr = NULL;
     server.unixsocket = NULL;
@@ -988,6 +989,16 @@ void initServer() {
                 strerror(errno));
             exit(1);
         }
+    }
+
+    /* 32 bit instances are limited to 4GB of address space, so if there is
+     * no explicit limit in the user provided configuration we set a limit
+     * at 3.5GB using maxmemory with 'noeviction' policy'. This saves
+     * useless crashes of the Redis instance. */
+    if (server.arch_bits == 32 && server.maxmemory == 0) {
+        redisLog(REDIS_WARNING,"Warning: 32 bit instance detected but no memory limit set. Setting 3.5 GB maxmemory limit with 'noeviction' policy now.");
+        server.maxmemory = 3584LL*(1024*1024); /* 3584 MB = 3.5 GB */
+        server.maxmemory_policy = REDIS_MAXMEMORY_NO_EVICTION;
     }
 
     if (server.vm_enabled) vmInit();
@@ -1263,7 +1274,7 @@ sds genRedisInfoString(void) {
         "redis_version:%s\r\n"
         "redis_git_sha1:%s\r\n"
         "redis_git_dirty:%d\r\n"
-        "arch_bits:%s\r\n"
+        "arch_bits:%d\r\n"
         "multiplexing_api:%s\r\n"
         "gcc_version:%d.%d.%d\r\n"
         "process_id:%ld\r\n"
@@ -1306,7 +1317,7 @@ sds genRedisInfoString(void) {
         ,REDIS_VERSION,
         redisGitSHA1(),
         strtol(redisGitDirty(),NULL,10) > 0,
-        (sizeof(long) == 8) ? "64" : "32",
+        server.arch_bits,
         aeGetApiName(),
 #ifdef __GNUC__
         __GNUC__,__GNUC_MINOR__,__GNUC_PATCHLEVEL__,
