@@ -1749,13 +1749,26 @@ void version() {
 void usage() {
     fprintf(stderr,"Usage: ./redis-server [/path/to/redis.conf]\n");
     fprintf(stderr,"       ./redis-server - (read config from stdin)\n");
+    fprintf(stderr,"       ./redis-server --test-memory <megabytes>\n\n");
     exit(1);
 }
+
+void memtest(size_t megabytes, int passes);
 
 int main(int argc, char **argv) {
     time_t start;
 
     initServerConfig();
+    if (argc >= 2 && strcmp(argv[1], "--test-memory") == 0) {
+        if (argc == 3) {
+            memtest(atoi(argv[2]),50);
+            exit(0);
+        } else {
+            fprintf(stderr,"Please specify the amount of memory to test in megabytes.\n");
+            fprintf(stderr,"Example: ./redis-server --test-memory 4096\n\n");
+            exit(1);
+        }
+    }
     if (argc == 2) {
         if (strcmp(argv[1], "-v") == 0 ||
             strcmp(argv[1], "--version") == 0) version();
@@ -1909,8 +1922,9 @@ static void sigsegvHandler(int sig, siginfo_t *info, void *secret) {
 
     redisLog(REDIS_WARNING,
 "=== REDIS BUG REPORT END. Make sure to include from START to END. ===\n\n"
-"    Please report the crash opening an issue on github:\n\n"
-"        http://github.com/antirez/redis/issues\n\n"
+"       Please report the crash opening an issue on github:\n\n"
+"           http://github.com/antirez/redis/issues\n\n"
+"  Suspect RAM error? Use redis-server --test-memory to veryfy it.\n\n"
 );
     /* free(messages); Don't call free() with possibly corrupted memory. */
     if (server.daemonize) unlink(server.pidfile);
