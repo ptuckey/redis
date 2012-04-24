@@ -232,6 +232,10 @@ void loadServerConfigFromString(char *config) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
             server.aof_state = yes ? REDIS_AOF_ON : REDIS_AOF_OFF;
+        } else if (!strcasecmp(argv[0],"syncfast") && argc == 2) {
+            if ((server.syncfast = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"appendfilename") && argc == 2) {
             zfree(server.aof_filename);
             server.aof_filename = zstrdup(argv[1]);
@@ -473,6 +477,11 @@ void configSetCommand(redisClient *c) {
                 return;
             }
         }
+    } else if (!strcasecmp(c->argv[2]->ptr,"syncfast")) {
+        int new = yesnotoi(o->ptr);
+
+        if (new == -1) goto badfmt;
+	server.syncfast = new;
     } else if (!strcasecmp(c->argv[2]->ptr,"auto-aof-rewrite-percentage")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR || ll < 0) goto badfmt;
         server.aof_rewrite_perc = ll;
@@ -734,6 +743,7 @@ void configGetCommand(redisClient *c) {
     config_get_numerical_field("watchdog-period",server.watchdog_period);
 
     /* Bool (yes/no) values */
+    config_get_bool_field("syncfast", server.syncfast);
     config_get_bool_field("no-appendfsync-on-rewrite",
             server.aof_no_fsync_on_rewrite);
     config_get_bool_field("slave-serve-stale-data",
