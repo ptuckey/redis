@@ -722,24 +722,6 @@ start_server {tags {"zset"}} {
             assert_equal {z} [r zsubset ztmp 3 y z x limit 1 1 defaultscore 0]
             assert_equal {} [r zsubset ztmp 3 z y x limit 3 5 defaultscore 0]
             assert_equal {x z} [r zsubset ztmp 3 x z y limit 0 2 defaultscore 0]
-            assert_equal {} [r zsubset ztmp 4 a c z x min 100 defaultscore 0]
-            assert_equal {} [r zsubset ztmp 4 a c z x max -20 defaultscore 0]
-        }
-
-        test "ZSUBSET with LIMIT - $encoding" {
-            assert_equal {x} [r zsubset ztmp 1 x limit 0 1]
-            assert_equal {y} [r zsubset ztmp 1 y limit 0 1]
-            assert_equal {x y} [r zsubset ztmp 2 x y limit 0 2]
-            assert_equal {x} [r zsubset ztmp 2 x z limit 0 2]
-            assert_equal {x} [r zsubset ztmp 3 x y z limit 0 1]
-            assert_equal {x} [r zsubset ztmp 3 y z x limit 1 1]
-            assert_equal {x y} [r zsubset ztmp 3 x y z limit 0 2]
-            assert_equal {} [r zsubset ztmp 3 z y x limit 2 5]
-            assert_equal {x z} [r zsubset ztmp 2 x z limit 0 2 defaultscore 0]
-            assert_equal {x} [r zsubset ztmp 3 x y z limit 0 1 defaultscore 0]
-            assert_equal {z} [r zsubset ztmp 3 y z x limit 1 1 defaultscore 0]
-            assert_equal {} [r zsubset ztmp 3 z y x limit 3 5 defaultscore 0]
-            assert_equal {x z} [r zsubset ztmp 3 x z y limit 0 2 defaultscore 0]
             assert_equal {x y} [r zsubset ztmp 4 a b x y limit 2 5 max 40]
             assert_equal {x y} [r zsubset ztmp 4 a b x y limit 0 3 max 20]
         }
