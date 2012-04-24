@@ -160,6 +160,8 @@ struct redisCommand redisCommandTable[] = {
     {"sdiffstore",sdiffstoreCommand,-3,"wm",0,NULL,1,-1,1,0,0},
     {"smembers",sinterCommand,2,"rS",0,NULL,1,1,1,0,0},
     {"zadd",zaddCommand,-4,"wm",0,NULL,1,1,1,0,0},
+    {"zaddnx",zaddnxCommand,-4,"wm",0,NULL,1,1,1,0,0},
+    {"zaddcmp",zaddcmpCommand,-4,"wm",0,NULL,1,1,1,0,0},
     {"zincrby",zincrbyCommand,4,"wm",0,NULL,1,1,1,0,0},
     {"zrem",zremCommand,-3,"w",0,NULL,1,1,1,0,0},
     {"zremrangebyscore",zremrangebyscoreCommand,4,"w",0,NULL,1,1,1,0,0},
@@ -371,7 +373,7 @@ void exitFromChild(int retcode) {
 /*====================== Hash table type implementation  ==================== */
 
 /* This is an hash table type that uses the SDS dynamic strings libary as
- * keys and radis objects as values (objects can hold SDS strings,
+ * keys and redis objects as values (objects can hold SDS strings,
  * lists, sets). */
 
 void dictVanillaFree(void *privdata, void *val)

@@ -809,7 +809,7 @@ void zsetConvert(robj *zobj, int encoding) {
  *----------------------------------------------------------------------------*/
 
 /* This generic command implements both ZADD and ZINCRBY. */
-void zaddGenericCommand(redisClient *c, int incr) {
+void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp) {
     static char *nanerr = "resulting score is not a number (NaN)";
     robj *key = c->argv[1];
     robj *ele;
@@ -819,7 +819,18 @@ void zaddGenericCommand(redisClient *c, int incr) {
     int j, elements = (c->argc-2)/2;
     int added = 0;
 
-    if (c->argc % 2) {
+    if (cmp) {
+        if (c->argc % 2) {
+            if (!strcasecmp(c->argv[c->argc-1]->ptr,"min"))
+                cmp = -1;
+            else if (!strcasecmp(c->argv[c->argc-1]->ptr,"max"))
+                cmp = 1;
+            else {
+                addReply(c,shared.syntaxerr);
+                return;
+            }
+        }
+    } else if (c->argc % 2) {
         addReply(c,shared.syntaxerr);
         return;
     }
@@ -865,7 +876,9 @@ void zaddGenericCommand(redisClient *c, int incr) {
             /* Prefer non-encoded element when dealing with ziplists. */
             ele = c->argv[3+j*2];
             if ((eptr = zzlFind(zobj->ptr,ele,&curscore)) != NULL) {
-                if (incr) {
+                if (nx)
+                    continue;
+                else if (incr) {
                     score += curscore;
                     if (isnan(score)) {
                         addReplyError(c,nanerr);
@@ -877,12 +890,15 @@ void zaddGenericCommand(redisClient *c, int incr) {
                 }
 
                 /* Remove and re-insert when score changed. */
-                if (score != curscore) {
+                if ((cmp == 0 && score != curscore) ||
+                    (cmp > 0 && score > curscore) ||
+                    (cmp < 0 && score < curscore)) {
                     zobj->ptr = zzlDelete(zobj->ptr,eptr);
                     zobj->ptr = zzlInsert(zobj->ptr,ele,score);
 
                     signalModifiedKey(c->db,key);
                     server.dirty++;
+                    if (cmp != 0) added++;
                 }
             } else {
                 /* Optimize: check if the element is too large or the list
@@ -908,7 +924,9 @@ void zaddGenericCommand(redisClient *c, int incr) {
                 curobj = dictGetKey(de);
                 curscore = *(double*)dictGetVal(de);
 
-                if (incr) {
+                if (nx)
+                    continue;
+                else if (incr) {
                     score += curscore;
                     if (isnan(score)) {
                         addReplyError(c,nanerr);
@@ -922,7 +940,9 @@ void zaddGenericCommand(redisClient *c, int incr) {
                 /* Remove and re-insert when score changed. We can safely
                  * delete the key object from the skiplist, since the
                  * dictionary still has a reference to it. */
-                if (score != curscore) {
+                if ((cmp == 0 && score != curscore) ||
+                    (cmp > 0 && score > curscore) ||
+                    (cmp < 0 && score < curscore)) {
                     redisAssertWithInfo(c,curobj,zslDelete(zs->zsl,curscore,curobj));
                     znode = zslInsert(zs->zsl,score,curobj);
                     incrRefCount(curobj); /* Re-inserted in skiplist. */
@@ -930,6 +950,7 @@ void zaddGenericCommand(redisClient *c, int incr) {
 
                     signalModifiedKey(c->db,key);
                     server.dirty++;
+                    if (cmp != 0) added++;
                 }
             } else {
                 znode = zslInsert(zs->zsl,score,ele);
@@ -953,11 +974,19 @@ void zaddGenericCommand(redisClient *c, int incr) {
 }
 
 void zaddCommand(redisClient *c) {
-    zaddGenericCommand(c,0);
+    zaddGenericCommand(c,0,0,0);
+}
+
+void zaddnxCommand(redisClient *c) {
+    zaddGenericCommand(c,0,1,0);
+}
+
+void zaddcmpCommand(redisClient *c) {
+    zaddGenericCommand(c,0,0,1);
 }
 
 void zincrbyCommand(redisClient *c) {
-    zaddGenericCommand(c,1);
+    zaddGenericCommand(c,1,0,0);
 }
 
 void zremCommand(redisClient *c) {
