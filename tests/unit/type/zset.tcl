@@ -657,6 +657,113 @@ start_server {tags {"zset"}} {
             }
         }
 
+        test "ZSUBSET basics - $encoding" {
+            r del ztmp
+            r zadd ztmp 10 x
+            r zadd ztmp 20 y
+            r zadd ztmp 30 a
+            r zadd ztmp 40 b
+            r zadd ztmp 50 c
+            r zadd ztmp -10 w
+
+            assert_equal {x} [r zsubset ztmp 1 x]
+            assert_equal {y} [r zsubset ztmp 1 y]
+            assert_equal {} [r zsubset ztmp 1 z]
+            assert_equal {x y} [r zsubset ztmp 3 x y z]
+            assert_equal {x y} [r zsubset ztmp 3 z x y]
+            assert_equal {y x} [r zsubset ztmp 3 y z x]
+            assert_equal {y x} [r zsubset ztmp 3 z y x]
+            assert_equal {x} [r zsubset ztmp 3 q x t]
+            assert_equal {y} [r zsubset ztmp 3 y q t]
+            assert_equal {} [r zsubset ztmp 3 z q t]
+            assert_equal {q x t} [r zsubset ztmp 3 q x t defaultscore 0]
+            assert_equal {y q t} [r zsubset ztmp 3 y q t defaultscore 0]
+            assert_equal {z q t} [r zsubset ztmp 3 z q t defaultscore 0]
+        }
+
+        test "ZSUBSET with WITHSCORES - $encoding" {
+            assert_equal {x 10} [r zsubset ztmp 1 x withscores]
+            assert_equal {y 20} [r zsubset ztmp 1 y withscores]
+            assert_equal {} [r zsubset ztmp 1 z withscores]
+            assert_equal {x 10 y 20} [r zsubset ztmp 3 x y z withscores]
+            assert_equal {x 10 y 20} [r zsubset ztmp 3 z x y withscores]
+            assert_equal {y 20 x 10} [r zsubset ztmp 3 y z x withscores]
+            assert_equal {y 20 x 10} [r zsubset ztmp 3 z y x withscores]
+            assert_equal {x 10} [r zsubset ztmp 3 q x t withscores]
+            assert_equal {y 20} [r zsubset ztmp 3 y q t withscores]
+            assert_equal {} [r zsubset ztmp 3 z q t withscores]
+            assert_equal {q 0 x 10 t 0} [r zsubset ztmp 3 q x t withscores defaultscore 0]
+            assert_equal {y 20 q 2 t 2} [r zsubset ztmp 3 y q t withscores defaultscore 2]
+            assert_equal {z 4 q 4 t 4} [r zsubset ztmp 3 z q t withscores defaultscore 4]
+        }
+
+        test "ZSUBSET with MIN/MAX - $encoding" {
+            assert_equal {a c} [r zsubset ztmp 4 a c z x min 20]
+            assert_equal {a x} [r zsubset ztmp 4 a c z x max 40]
+            assert_equal {} [r zsubset ztmp 4 a c z x min 100]
+            assert_equal {} [r zsubset ztmp 4 a c z x max -20]
+            assert_equal {a c} [r zsubset ztmp 4 a c z x min 20 defaultscore 0]
+            assert_equal {a z x} [r zsubset ztmp 4 a c z x max 40 defaultscore 0]
+            assert_equal {} [r zsubset ztmp 4 a c z x min 100 defaultscore 0]
+            assert_equal {} [r zsubset ztmp 4 a c z x max -20 defaultscore 0]
+        }
+
+        test "ZSUBSET with LIMIT - $encoding" {
+            assert_equal {x} [r zsubset ztmp 1 x limit 0 1]
+            assert_equal {y} [r zsubset ztmp 1 y limit 0 1]
+            assert_equal {x y} [r zsubset ztmp 2 x y limit 0 2]
+            assert_equal {x} [r zsubset ztmp 2 x z limit 0 2]
+            assert_equal {x} [r zsubset ztmp 3 x y z limit 0 1]
+            assert_equal {x} [r zsubset ztmp 3 y z x limit 1 1]
+            assert_equal {x y} [r zsubset ztmp 3 x y z limit 0 2]
+            assert_equal {} [r zsubset ztmp 3 z y x limit 2 5]
+            assert_equal {x z} [r zsubset ztmp 2 x z limit 0 2 defaultscore 0]
+            assert_equal {x} [r zsubset ztmp 3 x y z limit 0 1 defaultscore 0]
+            assert_equal {z} [r zsubset ztmp 3 y z x limit 1 1 defaultscore 0]
+            assert_equal {} [r zsubset ztmp 3 z y x limit 3 5 defaultscore 0]
+            assert_equal {x z} [r zsubset ztmp 3 x z y limit 0 2 defaultscore 0]
+            assert_equal {} [r zsubset ztmp 4 a c z x min 100 defaultscore 0]
+            assert_equal {} [r zsubset ztmp 4 a c z x max -20 defaultscore 0]
+        }
+
+        test "ZSUBSET with LIMIT - $encoding" {
+            assert_equal {x} [r zsubset ztmp 1 x limit 0 1]
+            assert_equal {y} [r zsubset ztmp 1 y limit 0 1]
+            assert_equal {x y} [r zsubset ztmp 2 x y limit 0 2]
+            assert_equal {x} [r zsubset ztmp 2 x z limit 0 2]
+            assert_equal {x} [r zsubset ztmp 3 x y z limit 0 1]
+            assert_equal {x} [r zsubset ztmp 3 y z x limit 1 1]
+            assert_equal {x y} [r zsubset ztmp 3 x y z limit 0 2]
+            assert_equal {} [r zsubset ztmp 3 z y x limit 2 5]
+            assert_equal {x z} [r zsubset ztmp 2 x z limit 0 2 defaultscore 0]
+            assert_equal {x} [r zsubset ztmp 3 x y z limit 0 1 defaultscore 0]
+            assert_equal {z} [r zsubset ztmp 3 y z x limit 1 1 defaultscore 0]
+            assert_equal {} [r zsubset ztmp 3 z y x limit 3 5 defaultscore 0]
+            assert_equal {x z} [r zsubset ztmp 3 x z y limit 0 2 defaultscore 0]
+            assert_equal {x y} [r zsubset ztmp 4 a b x y limit 2 5 max 40]
+            assert_equal {x y} [r zsubset ztmp 4 a b x y limit 0 3 max 20]
+        }
+
+        test "ZSUBSET with SORT - $encoding" {
+            assert_equal {x a c} [r zsubset ztmp 4 a c z x sort]
+            assert_equal {x a c} [r zsubset ztmp 4 a c z x sort asc]
+            assert_equal {x a} [r zsubset ztmp 4 a c z x sort max 40]
+            assert_equal {c a x} [r zsubset ztmp 4 a c z x sort desc]
+            assert_equal {z x a c} [r zsubset ztmp 4 a c z x sort defaultscore 0]
+            assert_equal {z x a} [r zsubset ztmp 4 a c z x sort max 40 defaultscore 0]
+            assert_equal {x a} [r zsubset ztmp 4 a c z x sort max 40 defaultscore 80]
+            assert_equal {c a x z} [r zsubset ztmp 4 a c z x sort desc defaultscore 0]
+            assert_equal {z c a x} [r zsubset ztmp 4 a c z x sort desc defaultscore 80]
+            assert_equal {x a} [r zsubset ztmp 4 a c z x sort limit 0 2]
+            assert_equal {a c} [r zsubset ztmp 4 a c z x sort limit 1 2]
+            assert_equal {a} [r zsubset ztmp 4 a c z x sort limit 1 2 max 40]
+            assert_equal {c a} [r zsubset ztmp 4 a c z x sort desc limit 0 2]
+            assert_equal {a x} [r zsubset ztmp 4 a c z x sort desc limit 1 2]
+            assert_equal {w -10 x 10 c 50} [r zsubset ztmp 4 w c z x withscores sort]
+            assert_equal {x 10 c 50} [r zsubset ztmp 4 w c z x withscores sort limit 1 2]
+            assert_equal {c 50 x 10} [r zsubset ztmp 4 w c z x withscores sort desc limit 0 2]
+        }
+
         test "ZSET sorting stresser - $encoding" {
             set delta 0
             for {set test 0} {$test < 2} {incr test} {
