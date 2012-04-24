@@ -836,10 +836,10 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp, int cap) {
         if (cap && getLongFromObjectOrReply(c, c->argv[2], &capLen, NULL) != REDIS_OK)
             return;
 
-	if ((c->argc + (cap?1:0)) % 2 || (cap && capLen < 1)) {
+        if ((c->argc + (cap?1:0)) % 2 || (cap && capLen < 1)) {
             addReply(c,shared.syntaxerr);
             return;
-	}
+        }
     }
 
     /* Start parsing all the scores, we need to emit any syntax error

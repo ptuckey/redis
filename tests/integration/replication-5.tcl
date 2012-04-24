@@ -60,18 +60,18 @@ start_server {tags {"repl"}} {
 }
 start_server {tags {"repl"}} {
     r set mykey foo
-    
+
     start_server {} {
         test {Second server should have role master at first} {
             s role
         } {master}
-        
+
         test {SLAVEOF should start with link status "down"} {
             r config set syncfast yes
             r slaveof [srv -1 host] [srv -1 port]
             s master_link_status
         } {down}
-        
+
         test {The role should immediately be changed to "slave"} {
             s role
         } {slave}
@@ -80,11 +80,11 @@ start_server {tags {"repl"}} {
         test {Sync should have NOT transferred keys from master (syncfast)} {
             r get mykey
         } {}
-        
+
         test {The link status should be up} {
             s master_link_status
         } {up}
-        
+
         test {SET on the master should immediately propagate (syncfast)} {
             r -1 set mykey bar
             if {$::valgrind} {after 2000}
