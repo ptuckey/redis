@@ -26,18 +26,23 @@ Also the following redis.conf and CONFIG GET / SET parameters changed name:
 
     * hash-max-zipmap-entries, now replaced by hash-max-ziplist-entries
     * hash-max-zipmap-value, now replaced by hash-max-ziplist-value
-    * glueoutputbuf was no completely removed as it does not make sense
+    * glueoutputbuf option was now completely removed (was deprecated)
 
 ---------
 CHANGELOG
 ---------
 
-What's new in Redis 2.6.0
-=========================
+What's new in Redis 2.5.7 (aka 2.6 Release Candidate 1)
+=======================================================
 
-UPGRADE URGENCY: We suggest new users to start with 2.6.0, and old users to
-                 upgrade after some testing of the application with the new
-                 Redis version.
+UPGRADE URGENCY: upgrade not recommended because this is an RC release.
+
+* This is the first release candidate for Redis 2.6. We are not aware of
+  bugs, but part of this code is young and was never tested in production
+  environments, so handle with care.
+
+An overview of new features and changes in Redis 2.6.x
+======================================================
 
 * Server side Lua scripting, see http://redis.io/commands/eval
 * Virtual Memory removed (was deprecated in 2.4)
@@ -46,6 +51,8 @@ UPGRADE URGENCY: We suggest new users to start with 2.6.0, and old users to
   in slaves.
 * Milliseconds resolution expires, also added new commands with milliseconds
   precision (PEXPIRE, PTTL, ...).
+* Better memory usage for "small" lists, ziplists and hashes when fields or
+  values contain small integers.
 * Clients max output buffer soft and hard limits. You can specifiy different
   limits for different classes of clients (normal,pubsub,slave).
 * AOF is now able to rewrite aggregate data types using variadic commands,
@@ -54,6 +61,12 @@ UPGRADE URGENCY: We suggest new users to start with 2.6.0, and old users to
   redis-server binary, with the same name and number of arguments.
 * Hash table seed randomization for protection against collisions attacks.
 * Performances improved when writing large objects to Redis.
+* Integrated memory test, see redis-server --test-memory.
+* INCRBYFLOAT and HINCRBYFLOAT commands.
+* New DUMP, RESTORE, MIGRATE commands (back ported from Redis Cluster to 2.6).
+* CRC64 checksump in RDB files.
+* Better MONITOR output and behavior (now commands are logged before execution).
+* "Software Watchdog" feature to debug latency issues.
 * Significant parts of the core refactored or rewritten. New internal APIs
   and core changes allowed to develop Redis Cluster on top of the new code,
   however for 2.6 all the cluster code was removed, and will be released with
@@ -70,7 +83,8 @@ UPGRADE URGENCY: We suggest new users to start with 2.6.0, and old users to
 * New statistics about how many time a command was called, and how much
   execution time it used (INFO commandstats).
 * More predictable SORT behavior in edge cases.
-* INCRBYFLOAT and HINCRBYFLOAT commands.
+* Better support for big endian and *BSD systems.
+* Build system improved.
 
 --------------------------------------------------------------------------------
 
