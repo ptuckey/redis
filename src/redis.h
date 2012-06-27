@@ -56,6 +56,7 @@
 #define REDIS_SLOWLOG_LOG_SLOWER_THAN 10000
 #define REDIS_SLOWLOG_MAX_LEN 128
 #define REDIS_MAX_CLIENTS 10000
+#define REDIS_AUTHPASS_MAX_LEN 512
 
 #define REDIS_REPL_TIMEOUT 60
 #define REDIS_REPL_PING_SLAVE_PERIOD 10
@@ -1135,4 +1136,5 @@ sds genRedisInfoString(char *section);
 void enableWatchdog(int period);
 void disableWatchdog(void);
 void watchdogScheduleSignal(int period);
+void redisLogHexDump(int level, char *descr, void *value, size_t len);
 #endif
