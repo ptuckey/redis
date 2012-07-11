@@ -179,6 +179,7 @@ struct redisCommand readonlyCommandTable[] = {
     {"discard",discardCommand,1,0,NULL,0,0,0},
     {"sync",syncCommand,1,0,NULL,0,0,0},
     {"syncfast",syncfastCommand,1,0,NULL,0,0,0},
+    {"replconf",replconfCommand,-1,0,NULL,0,0,0},
     {"flushdb",flushdbCommand,1,0,NULL,0,0,0},
     {"flushall",flushallCommand,1,0,NULL,0,0,0},
     {"sort",sortCommand,-2,REDIS_CMD_DENYOOM,NULL,1,1,1},
@@ -1407,7 +1408,7 @@ sds genRedisInfoString(void) {
             }
             if (state == NULL) continue;
             info = sdscatprintf(info,"slave%d:%s,%d,%s\r\n",
-                slaveid,ip,port,state);
+                slaveid,ip,slave->slave_listening_port,state);
             slaveid++;
         }
     }
