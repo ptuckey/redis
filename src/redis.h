@@ -85,6 +85,8 @@
 #define REDIS_CMD_NOSCRIPT  64              /* "s" flag */
 #define REDIS_CMD_RANDOM 128                /* "R" flag */
 #define REDIS_CMD_SORT_FOR_SCRIPT 256       /* "S" flag */
+#define REDIS_CMD_LOADING 512               /* "l" flag */
+#define REDIS_CMD_STALE 1024                /* "t" flag */
 
 /* Object types */
 #define REDIS_STRING 0
@@ -515,6 +517,7 @@ struct redisServer {
     time_t aof_last_fsync;            /* UNIX time of last fsync() */
     time_t aof_rewrite_time_last;   /* Time used by last AOF rewrite run. */
     time_t aof_rewrite_time_start;  /* Current AOF rewrite start time. */
+    int aof_lastbgrewrite_status;   /* REDIS_OK or REDIS_ERR */
     unsigned long aof_delayed_fsync;  /* delayed AOF fsync() counter */
     /* RDB persistence */
     long long dirty;                /* Changes to DB from the last save */
