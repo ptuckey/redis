@@ -167,6 +167,13 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     redisClient *c = server.lua_client;
     sds reply;
 
+    /* Require at least one argument */
+    if (argc == 0) {
+        luaPushError(lua,
+            "Please specify at least one argument for redis.call()");
+        return 1;
+    }
+
     /* Build the arguments vector */
     argv = zmalloc(sizeof(robj*)*argc);
     for (j = 0; j < argc; j++) {
@@ -275,11 +282,10 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
      * reply as expected. */
     if ((cmd->flags & REDIS_CMD_SORT_FOR_SCRIPT) &&
         (reply[0] == '*' && reply[1] != '-')) {
-        /* Skip this step if command is SORT but output was already sorted */
-        if (cmd->proc != sortCommand || server.sort_dontsort)
             luaSortArray(lua);
     }
     sdsfree(reply);
+    c->reply_bytes = 0;
 
 cleanup:
     /* Clean up. Command code may have changed argv/argc so we use the

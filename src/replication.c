@@ -353,16 +353,18 @@ void replicationAbortSyncTransfer(void) {
 }
 
 /* Asynchronously read the SYNC payload we receive from a master */
+#define REPL_MAX_WRITTEN_BEFORE_FSYNC (1024*1024*8) /* 8 MB */
 void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
     char buf[4096];
     ssize_t nread, readlen;
+    off_t left;
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(privdata);
     REDIS_NOTUSED(mask);
 
-    /* If repl_transfer_left == -1 we still have to read the bulk length
+    /* If repl_transfer_size == -1 we still have to read the bulk length
      * from the master reply. */
-    if (server.repl_transfer_left == -1) {
+    if (server.repl_transfer_size == -1) {
         if (syncReadLine(fd,buf,1024,server.repl_syncio_timeout*1000) == -1) {
             redisLog(REDIS_WARNING,
                 "I/O error reading bulk count from MASTER: %s",
@@ -385,19 +387,19 @@ void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
             redisLog(REDIS_WARNING,"Bad protocol from MASTER, the first byte is not '$', are you sure the host and port are right?");
             goto error;
         }
-        server.repl_transfer_left = strtol(buf+1,NULL,10);
+        server.repl_transfer_size = strtol(buf+1,NULL,10);
         redisLog(REDIS_NOTICE,
             "MASTER <-> SLAVE sync: receiving %ld bytes from master",
-            server.repl_transfer_left);
-        if (server.repl_transfer_left != 0) {
+            server.repl_transfer_size);
+        if (server.repl_transfer_size != 0) {
             return;
         }
     }
 
-    if (server.repl_transfer_left != 0) {
+    if (server.repl_transfer_size != 0) {
         /* Read bulk data */
-        readlen = (server.repl_transfer_left < (signed)sizeof(buf)) ?
-            server.repl_transfer_left : (signed)sizeof(buf);
+        left = server.repl_transfer_size - server.repl_transfer_read;
+        readlen = (left < (signed)sizeof(buf)) ? left : (signed)sizeof(buf);
         nread = read(fd,buf,readlen);
         if (nread <= 0) {
             redisLog(REDIS_WARNING,"I/O error trying to sync with MASTER: %s",
@@ -410,11 +412,39 @@ void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask) {
             redisLog(REDIS_WARNING,"Write error or short write writing to the DB dump file needed for MASTER <-> SLAVE synchronization: %s", strerror(errno));
             goto error;
         }
-        server.repl_transfer_left -= nread;
+        server.repl_transfer_read += nread;
+
+        /* Sync data on disk from time to time, otherwise at the end of the transfer
+         * we may suffer a big delay as the memory buffers are copied into the
+         * actual disk. */
+        if (server.repl_transfer_read >=
+            server.repl_transfer_last_fsync_off + REPL_MAX_WRITTEN_BEFORE_FSYNC)
+        {
+            off_t sync_size = server.repl_transfer_read -
+                              server.repl_transfer_last_fsync_off;
+            rdb_fsync_range(server.repl_transfer_fd,
+                server.repl_transfer_last_fsync_off, sync_size);
+            server.repl_transfer_last_fsync_off += sync_size;
+        }
+
+        /* Check if the transfer is now complete */
+        if (server.repl_transfer_read == server.repl_transfer_size) {
+            if (rename(server.repl_transfer_tmpfile,server.rdb_filename) == -1) {
+                redisLog(REDIS_WARNING,"Failed trying to rename the temp DB into dump.rdb in MASTER <-> SLAVE synchronization: %s", strerror(errno));
+                replicationAbortSyncTransfer();
+                return;
+            }
+            server.repl_transfer_lastio = server.unixtime;
+            if (write(server.repl_transfer_fd,buf,nread) != nread) {
+                redisLog(REDIS_WARNING,"Write error or short write writing to the DB dump file needed for MASTER <-> SLAVE synchronization: %s", strerror(errno));
+                goto error;
+            }
+            server.repl_transfer_read += nread;
+        }
     }
 
     /* Check if the transfer is now complete */
-    if (server.repl_transfer_left == 0) {
+    if (server.repl_transfer_read == server.repl_transfer_size) {
         struct redis_stat buf;
 
         redis_fstat(server.repl_transfer_fd, &buf);
@@ -531,6 +561,8 @@ char *sendSynchronousCommand(int fd, ...) {
 void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
     char tmpfile[256], *err;
     int dfd, maxtries = 5;
+    int sockerr = 0;
+    socklen_t errlen = sizeof(sockerr);
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(privdata);
     REDIS_NOTUSED(mask);
@@ -542,11 +574,62 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
         return;
     }
 
-    redisLog(REDIS_NOTICE,"Non blocking connect for SYNC fired the event.");
-    /* This event should only be triggered once since it is used to have a
-     * non-blocking connect(2) to the master. It has been triggered when this
-     * function is called, so we can delete it. */
-    aeDeleteFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE);
+    /* Check for errors in the socket. */
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &errlen) == -1)
+        sockerr = errno;
+    if (sockerr) {
+        aeDeleteFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE);
+        redisLog(REDIS_WARNING,"Error condition on socket for SYNC: %s",
+            strerror(sockerr));
+        goto error;
+    }
+
+    /* If we were connecting, it's time to send a non blocking PING, we want to
+     * make sure the master is able to reply before going into the actual
+     * replication process where we have long timeouts in the order of
+     * seconds (in the meantime the slave would block). */
+    if (server.repl_state == REDIS_REPL_CONNECTING) {
+        redisLog(REDIS_NOTICE,"Non blocking connect for SYNC fired the event.");
+        /* Delete the writable event so that the readable event remains
+         * registered and we can wait for the PONG reply. */
+        aeDeleteFileEvent(server.el,fd,AE_WRITABLE);
+        server.repl_state = REDIS_REPL_RECEIVE_PONG;
+        /* Send the PING, don't check for errors at all, we have the timeout
+         * that will take care about this. */
+        syncWrite(fd,"PING\r\n",6,100);
+        return;
+    }
+
+    /* Receive the PONG command. */
+    if (server.repl_state == REDIS_REPL_RECEIVE_PONG) {
+        char buf[1024];
+
+        /* Delete the readable event, we no longer need it now that there is
+         * the PING reply to read. */
+        aeDeleteFileEvent(server.el,fd,AE_READABLE);
+
+        /* Read the reply with explicit timeout. */
+        buf[0] = '\0';
+        if (syncReadLine(fd,buf,sizeof(buf),
+            server.repl_syncio_timeout*1000) == -1)
+        {
+            redisLog(REDIS_WARNING,
+                "I/O error reading PING reply from master: %s",
+                strerror(errno));
+            goto error;
+        }
+
+        /* We don't care about the reply, it can be +PONG or an error since
+         * the server requires AUTH. As long as it replies correctly, it's
+         * fine from our point of view. */
+        if (buf[0] != '-' && buf[0] != '+') {
+            redisLog(REDIS_WARNING,"Unexpected reply to PING from master.");
+            goto error;
+        } else {
+            redisLog(REDIS_NOTICE,
+                "Master replied to PING, replication can continue...");
+        }
+    }
 
     /* AUTH with the master if required. */
     if(server.masterauth) {
@@ -604,15 +687,18 @@ void syncWithMaster(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 
     server.repl_state = REDIS_REPL_TRANSFER;
-    server.repl_transfer_left = -1;
+    server.repl_transfer_size = -1;
+    server.repl_transfer_read = 0;
+    server.repl_transfer_last_fsync_off = 0;
     server.repl_transfer_fd = dfd;
     server.repl_transfer_lastio = server.unixtime;
     server.repl_transfer_tmpfile = zstrdup(tmpfile);
     return;
 
 error:
-    server.repl_state = REDIS_REPL_CONNECT;
     close(fd);
+    server.repl_transfer_s = -1;
+    server.repl_state = REDIS_REPL_CONNECT;
     return;
 }
 
@@ -645,7 +731,8 @@ int connectWithMaster(void) {
 void undoConnectWithMaster(void) {
     int fd = server.repl_transfer_s;
 
-    redisAssert(server.repl_state == REDIS_REPL_CONNECTING);
+    redisAssert(server.repl_state == REDIS_REPL_CONNECTING ||
+                server.repl_state == REDIS_REPL_RECEIVE_PONG);
     aeDeleteFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE);
     close(fd);
     server.repl_transfer_s = -1;
@@ -661,7 +748,8 @@ void slaveofCommand(redisClient *c) {
             if (server.master) freeClient(server.master);
             if (server.repl_state == REDIS_REPL_TRANSFER)
                 replicationAbortSyncTransfer();
-            else if (server.repl_state == REDIS_REPL_CONNECTING)
+            else if (server.repl_state == REDIS_REPL_CONNECTING ||
+                     server.repl_state == REDIS_REPL_RECEIVE_PONG)
                 undoConnectWithMaster();
             server.repl_state = REDIS_REPL_NONE;
             redisLog(REDIS_NOTICE,"MASTER MODE enabled (user request)");
@@ -699,7 +787,9 @@ void slaveofCommand(redisClient *c) {
 
 void replicationCron(void) {
     /* Non blocking connection timeout? */
-    if (server.masterhost && server.repl_state == REDIS_REPL_CONNECTING &&
+    if (server.masterhost &&
+        (server.repl_state == REDIS_REPL_CONNECTING ||
+         server.repl_state == REDIS_REPL_RECEIVE_PONG) &&
         (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
     {
         redisLog(REDIS_WARNING,"Timeout connecting to the MASTER...");
@@ -734,7 +824,7 @@ void replicationCron(void) {
      * So slaves can implement an explicit timeout to masters, and will
      * be able to detect a link disconnection even if the TCP connection
      * will not actually go down. */
-    if (!(server.cronloops % (server.repl_ping_slave_period*10))) {
+    if (!(server.cronloops % (server.repl_ping_slave_period * REDIS_HZ))) {
         listIter li;
         listNode *ln;
 
