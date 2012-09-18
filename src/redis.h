@@ -57,10 +57,9 @@
 #define REDIS_SLOWLOG_MAX_LEN 128
 #define REDIS_MAX_CLIENTS 10000
 #define REDIS_AUTHPASS_MAX_LEN 512
-
+#define REDIS_DEFAULT_SLAVE_PRIORITY 100
 #define REDIS_REPL_TIMEOUT 60
 #define REDIS_REPL_PING_SLAVE_PERIOD 10
-
 #define REDIS_RUN_ID_SIZE 40
 #define REDIS_OPS_SEC_SAMPLES 16
 
@@ -168,8 +167,9 @@
 #define REDIS_REPL_NONE 0 /* No active replication */
 #define REDIS_REPL_CONNECT 1 /* Must connect to master */
 #define REDIS_REPL_CONNECTING 2 /* Connecting to master */
-#define REDIS_REPL_TRANSFER 3 /* Receiving .rdb from master */
-#define REDIS_REPL_CONNECTED 4 /* Connected to master */
+#define REDIS_REPL_RECEIVE_PONG 3 /* Wait for PING reply */
+#define REDIS_REPL_TRANSFER 4 /* Receiving .rdb from master */
+#define REDIS_REPL_CONNECTED 5 /* Connected to master */
 
 /* Synchronous read timeout - slave side */
 #define REDIS_REPL_SYNCIO_TIMEOUT 5
@@ -295,6 +295,7 @@ typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
+    dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
     int id;
 } redisDb;
@@ -320,6 +321,22 @@ typedef struct blockingState {
     robj *target;           /* The key that should receive the element,
                              * for BRPOPLPUSH. */
 } blockingState;
+
+/* The following structure represents a node in the server.ready_keys list,
+ * where we accumulate all the keys that had clients blocked with a blocking
+ * operation such as B[LR]POP, but received new data in the context of the
+ * last executed command.
+ *
+ * After the execution of every command or script, we run this list to check
+ * if as a result we should serve data to clients blocked, unblocking them.
+ * Note that server.ready_keys will not have duplicates as there dictionary
+ * also called ready_keys in every structure representing a Redis database,
+ * where we make sure to remember if a given key was already added in the
+ * server.ready_keys list. */
+typedef struct readyList {
+    redisDb *db;
+    robj *key;
+} readyList;
 
 /* With multiplexing we need to take per-clinet state.
  * Clients are taken in a liked list. */
@@ -375,6 +392,7 @@ struct sharedObjectsStruct {
     *masterdownerr, *roslaveerr,
     *oomerr, *plus, *messagebulk, *pmessagebulk, *subscribebulk,
     *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *rpop, *lpop,
+    *lpush,
     *select[REDIS_SHARED_SELECT_CMDS],
     *integers[REDIS_SHARED_INTEGERS],
     *mbulkhdr[REDIS_SHARED_BULKHDR_LEN], /* "*<value>\r\n" */
@@ -469,7 +487,8 @@ struct redisServer {
     off_t loading_loaded_bytes;
     time_t loading_start_time;
     /* Fast pointers to often looked up command */
-    struct redisCommand *delCommand, *multiCommand, *lpushCommand;
+    struct redisCommand *delCommand, *multiCommand, *lpushCommand, *lpopCommand,
+                        *rpopCommand;
     /* Fields used only for stats */
     time_t stat_starttime;          /* Server start time */
     long long stat_numcommands;     /* Number of processed commands */
@@ -545,12 +564,14 @@ struct redisServer {
     char *masterhost;               /* Hostname of master */
     int masterport;                 /* Port of master */
     int syncfast;                   /* Fast slave syncing */
-    int repl_ping_slave_period;     /* Master pings the salve every N seconds */
+    int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     int repl_timeout;               /* Timeout after N seconds of master idle */
     redisClient *master;     /* Client that is master for this slave */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
     int repl_state;          /* Replication status if the instance is a slave */
-    off_t repl_transfer_left;  /* Bytes left reading .rdb  */
+    off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
+    off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
+    off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */
     int repl_transfer_s;     /* Slave -> Master SYNC socket */
     int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
     char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */
@@ -558,6 +579,7 @@ struct redisServer {
     int repl_serve_stale_data; /* Serve stale data when link is down? */
     int repl_slave_ro;          /* Slave is read only? */
     time_t repl_down_since; /* Unix time at which link with master went down */
+    int slave_priority;             /* Reported in INFO and used by Sentinel. */
     /* Limits */
     unsigned int maxclients;        /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
@@ -566,9 +588,9 @@ struct redisServer {
     /* Blocked clients */
     unsigned int bpop_blocked_clients; /* Number of clients blocked by lists */
     list *unblocked_clients; /* list of clients to unblock before next loop */
+    list *ready_keys;        /* List of readyList structures for BLPOP & co */
     /* Sort parameters - qsort_r() is only available under BSD so we
      * have to take this state global, in order to pass it to sortCompare() */
-    int sort_dontsort;
     int sort_desc;
     int sort_alpha;
     int sort_bypattern;
@@ -776,7 +798,7 @@ int listTypeEqual(listTypeEntry *entry, robj *o);
 void listTypeDelete(listTypeEntry *entry);
 void listTypeConvert(robj *subject, int enc);
 void unblockClientWaitingData(redisClient *c);
-int handleClientsWaitingListPush(redisClient *c, robj *key, robj *ele);
+void handleClientsBlockedOnLists(void);
 void popGenericCommand(redisClient *c, int where);
 
 /* MULTI/EXEC/WATCH... */
