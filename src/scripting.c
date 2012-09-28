@@ -332,6 +332,34 @@ int luaRedisSha1hexCommand(lua_State *lua) {
     return 1;
 }
 
+/* Returns a table with a single field 'field' set to the string value
+ * passed as argument. This helper function is handy when returning
+ * a Redis Protocol error or status reply from Lua:
+ *
+ * return redis.error_reply("ERR Some Error")
+ * return redis.status_reply("ERR Some Error")
+ */
+int luaRedisReturnSingleFieldTable(lua_State *lua, char *field) {
+    if (lua_gettop(lua) != 1 || lua_type(lua,-1) != LUA_TSTRING) {
+        luaPushError(lua, "wrong number or type of arguments");
+        return 1;
+    }
+
+    lua_newtable(lua);
+    lua_pushstring(lua, field);
+    lua_pushvalue(lua, -3);
+    lua_settable(lua, -3);
+    return 1;
+}
+
+int luaRedisErrorReplyCommand(lua_State *lua) {
+    return luaRedisReturnSingleFieldTable(lua,"err");
+}
+
+int luaRedisStatusReplyCommand(lua_State *lua) {
+    return luaRedisReturnSingleFieldTable(lua,"ok");
+}
+
 int luaLogCommand(lua_State *lua) {
     int j, argc = lua_gettop(lua);
     int level;
@@ -516,6 +544,22 @@ void scriptingInit(void) {
     lua_pushcfunction(lua, luaRedisSha1hexCommand);
     lua_settable(lua, -3);
 
+    /* redis.NIL */
+    lua_pushstring(lua, "NIL");
+    lua_newtable(lua);
+    lua_pushstring(lua, "nilbulk");
+    lua_pushboolean(lua, 1);
+    lua_settable(lua, -3);
+    lua_settable(lua, -3);
+
+    /* redis.error_reply and redis.status_reply */
+    lua_pushstring(lua, "error_reply");
+    lua_pushcfunction(lua, luaRedisErrorReplyCommand);
+    lua_settable(lua, -3);
+    lua_pushstring(lua, "status_reply");
+    lua_pushcfunction(lua, luaRedisStatusReplyCommand);
+    lua_settable(lua, -3);
+
     /* Finally set the table as 'redis' global var. */
     lua_setglobal(lua,"redis");
 
@@ -610,9 +654,30 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
         addReplyLongLong(c,(long long)lua_tonumber(lua,-1));
         break;
     case LUA_TTABLE:
-        /* We need to check if it is an array, an error, or a status reply.
-         * Error are returned as a single element table with 'err' field.
-         * Status replies are returned as single elment table with 'ok' field */
+        /* The table can be an array or it may be in a special format that
+         * Lua uses to return special Redis protocol data types.
+         *
+         * 1) Errors are retuned as a single element table with 'err' field.
+         * 2) Status reply are returned as a single element table with 'ok'
+         *    field.
+         * 3) A Redis nil bulk reply is returned as a single element table
+         *    with 'nilbulk' field set to true.
+         *
+         * All the rest is considered just an array and is translated into
+         * a Redis multi bulk reply. */
+
+        /* Nil bulk reply */
+        lua_pushstring(lua,"nilbulk");
+        lua_gettable(lua,-2);
+        t = lua_type(lua,-1);
+        if (t == LUA_TBOOLEAN) {
+            addReply(c,shared.nullbulk);
+            lua_pop(lua,2);
+            return;
+        }
+        lua_pop(lua,1);
+
+        /* Error reply */
         lua_pushstring(lua,"err");
         lua_gettable(lua,-2);
         t = lua_type(lua,-1);
@@ -624,8 +689,9 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
             lua_pop(lua,2);
             return;
         }
-
         lua_pop(lua,1);
+
+        /* Status reply */
         lua_pushstring(lua,"ok");
         lua_gettable(lua,-2);
         t = lua_type(lua,-1);
@@ -636,6 +702,7 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
             sdsfree(ok);
             lua_pop(lua,1);
         } else {
+            /* Multi bulk reply. */
             void *replylen = addDeferredMultiBulkLength(c);
             int j = 1, mbulklen = 0;
 
