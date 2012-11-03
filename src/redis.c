@@ -908,8 +908,12 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
             if (pid == server.rdb_child_pid) {
                 backgroundSaveDoneHandler(exitcode,bysignal);
-            } else {
+            } else if (pid == server.aof_child_pid) {
                 backgroundRewriteDoneHandler(exitcode,bysignal);
+            } else {
+                redisLog(REDIS_WARNING,
+                    "Warning, detected child with unmatched pid: %ld",
+                    (long)pid);
             }
             updateDictResizePolicy();
         }
@@ -1533,7 +1537,7 @@ void call(redisClient *c, int flags) {
 }
 
 /* If this function gets called we already read a whole
- * command, argments are in the client argv/argc fields.
+ * command, arguments are in the client argv/argc fields.
  * processCommand() execute the command or prepare the
  * server for a bulk read from the client.
  *
@@ -2181,7 +2185,7 @@ void infoCommand(redisClient *c) {
 }
 
 void monitorCommand(redisClient *c) {
-    /* ignore MONITOR if aleady slave or in monitor mode */
+    /* ignore MONITOR if already slave or in monitor mode */
     if (c->flags & REDIS_SLAVE) return;
 
     c->flags |= (REDIS_SLAVE|REDIS_MONITOR);
@@ -2280,7 +2284,7 @@ int freeMemoryIfNeeded(void) {
 
                     de = dictGetRandomKey(dict);
                     thiskey = dictGetKey(de);
-                    /* When policy is volatile-lru we need an additonal lookup
+                    /* When policy is volatile-lru we need an additional lookup
                      * to locate the real key, as dict is set to db->expires. */
                     if (server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_LRU)
                         de = dictFind(db->dict, thiskey);
@@ -2582,7 +2586,7 @@ int main(int argc, char **argv) {
     redisAsciiArt();
 
     if (!server.sentinel_mode) {
-        /* Things only needed when not runnign in Sentinel mode. */
+        /* Things only needed when not running in Sentinel mode. */
         redisLog(REDIS_WARNING,"Server started, Redis version " REDIS_VERSION);
     #ifdef __linux__
         linuxOvercommitMemoryWarning();
