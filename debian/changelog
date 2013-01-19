@@ -1,3 +1,9 @@
+redis (2:2.6.9-1rdio1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Manish Singh <manish@rd.io>  Wed, 16 Jan 2013 16:16:53 -0800
+
 redis (2:2.6.8-1rdio1) unstable; urgency=low
 
   * New upstream release
