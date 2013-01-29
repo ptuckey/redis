@@ -11,7 +11,7 @@ override_dh_auto_test:
 override_dh_auto_install:
 
 override_dh_installinit:
-	dh_installinit -r
+	dh_installinit -r --no-start
 
 clean:
 	dh $@

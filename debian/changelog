@@ -1,3 +1,9 @@
+redis (2:2.6.9-1rdio2) unstable; urgency=low
+
+  * Do not start server on install.
+
+ -- Manish Singh <manish@rd.io>  Tue, 29 2013 13:36:42 -0800
+
 redis (2:2.6.9-1rdio1) unstable; urgency=low
 
   * New upstream release
