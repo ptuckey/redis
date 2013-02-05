@@ -230,6 +230,10 @@ void loadServerConfigFromString(char *config) {
                 err = "repl-timeout must be 1 or greater";
                 goto loaderr;
             }
+        } else if (!strcasecmp(argv[0],"repl-disable-tcp-nodelay") && argc==2) {
+            if ((server.repl_disable_tcp_nodelay = yesnotoi(argv[1])) == -1) {
+                err = "argument must be 'yes' or 'no'"; goto loaderr;
+            }
         } else if (!strcasecmp(argv[0],"masterauth") && argc == 2) {
         	server.masterauth = zstrdup(argv[1]);
         } else if (!strcasecmp(argv[0],"slave-serve-stale-data") && argc == 2) {
@@ -706,6 +710,11 @@ void configSetCommand(redisClient *c) {
 
         if (yn == -1) goto badfmt;
         server.rdb_checksum = yn;
+    } else if (!strcasecmp(c->argv[2]->ptr,"repl-disable-tcp-nodelay")) {
+        int yn = yesnotoi(o->ptr);
+
+        if (yn == -1) goto badfmt;
+        server.repl_disable_tcp_nodelay = yn;
     } else if (!strcasecmp(c->argv[2]->ptr,"slave-priority")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR ||
             ll <= 0) goto badfmt;
@@ -815,6 +824,8 @@ void configGetCommand(redisClient *c) {
     config_get_bool_field("rdbcompression", server.rdb_compression);
     config_get_bool_field("rdbchecksum", server.rdb_checksum);
     config_get_bool_field("activerehashing", server.activerehashing);
+    config_get_bool_field("repl-disable-tcp-nodelay",
+            server.repl_disable_tcp_nodelay);
 
     /* Everything we can't handle with macros follows. */
 
