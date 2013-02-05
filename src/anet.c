@@ -75,16 +75,26 @@ int anetNonBlock(char *err, int fd)
     return ANET_OK;
 }
 
-int anetTcpNoDelay(char *err, int fd)
+static int anetSetTcpNoDelay(char *err, int fd, int val)
 {
-    int yes = 1;
-    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) == -1)
+    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) == -1)
     {
         anetSetError(err, "setsockopt TCP_NODELAY: %s", strerror(errno));
         return ANET_ERR;
     }
     return ANET_OK;
 }
+
+int anetEnableTcpNoDelay(char *err, int fd)
+{
+    return anetSetTcpNoDelay(err, fd, 1);
+}
+
+int anetDisableTcpNoDelay(char *err, int fd) 
+{
+    return anetSetTcpNoDelay(err, fd, 0);
+}
+
 
 int anetSetSendBuffer(char *err, int fd, int buffsize)
 {
