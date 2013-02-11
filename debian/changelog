@@ -1,3 +1,10 @@
+redis (2:2.6.10-1rdio2) unstable; urgency=low
+
+  * ZADDCMPCAP/ZADDCMPCAPREV commands, this is a combination of ZADDCMP
+    and ZADDCAP
+
+ -- Manish Singh <manish@rd.io>  Mon, 11 Feb 2013 14:35:23 -0800
+
 redis (2:2.6.10-1rdio1) unstable; urgency=low
 
   * New upstream release
