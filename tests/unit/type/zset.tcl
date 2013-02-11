@@ -110,16 +110,64 @@ start_server {tags {"zset"}} {
             assert_error "*ERR*syntax*" {r zaddcap myzset -1 0 abc}
         }
 
+        test {ZADDCMPCAP - Invalid negative cap} {
+            assert_error "*ERR*syntax*" {r zaddcmpcap myzset -1 0 abc}
+        }
+
         test {ZADDCAP - Invalid zero cap} {
             assert_error "*ERR*syntax*" {r zaddcap myzset 0 0 abc}
+        }
+
+        test {ZADDCMPCAP - Invalid zero cap} {
+            assert_error "*ERR*syntax*" {r zaddcmpcap myzset 2 0 0 abc}
         }
 
         test {ZADDCAPREV - Invalid negative cap} {
             assert_error "*ERR*syntax*" {r zaddcaprev myzset -1 0 abc}
         }
 
+        test {ZADDCMPCAPREV - Invalid negative cap} {
+            assert_error "*ERR*syntax*" {r zaddcmpcaprev myzset -1 0 abc}
+        }
+
         test {ZADDCAPREV - Invalid zero cap} {
             assert_error "*ERR*syntax*" {r zaddcaprev myzset 0 0 abc}
+        }
+
+        test {ZADDCMPCAPREV - Invalid zero cap} {
+            assert_error "*ERR*syntax*" {r zaddcmpcaprev myzset 2 0 0 abc}
+        }
+
+        test "ZADDCMPCAP - Generic - $encoding" {
+            r del ztmp
+            r zaddcmpcap ztmp 2 10 x
+            r zaddcmpcap ztmp 2 20 y
+            r zaddcmpcap ztmp 2 30 z
+            assert_equal {y z} [r zrange ztmp 0 -1]
+
+            r zadd ztmp 10 x
+            r zaddcmpcap ztmp 2 30 x min
+            assert_equal {y z} [r zrange ztmp 0 -1]
+
+            r zadd ztmp 10 x
+            r zaddcmpcap ztmp 2 40 x max
+            assert_equal {z x} [r zrange ztmp 0 -1]
+        }
+
+        test "ZADDCMPCAPREV - Generic - $encoding" {
+            r del ztmp
+            r zaddcmpcaprev ztmp 2 10 x
+            r zaddcmpcaprev ztmp 2 20 y
+            r zaddcmpcaprev ztmp 2 30 z
+            assert_equal {x y} [r zrange ztmp 0 -1]
+
+            r zadd ztmp 0 z
+            r zaddcmpcaprev ztmp 2 30 z min
+            assert_equal {z x} [r zrange ztmp 0 -1]
+
+            r zadd ztmp 5 y
+            r zaddcmpcaprev ztmp 2 20 y max
+            assert_equal {z x} [r zrange ztmp 0 -1]
         }
 
         test "ZADDCAP - Generic - $encoding" {
@@ -154,6 +202,20 @@ start_server {tags {"zset"}} {
 
             r zaddcaprev ztmp 2 5 yy
             assert_equal {yy x} [r zrange ztmp 0 -1]
+        }
+
+        test "ZADDCMPCAP - Variadic version - $encoding" {
+            r del ztmp
+            r zadd ztmp 5 z
+            r zaddcmpcap ztmp 2 10 x 20 y 30 z
+            assert_equal {y z} [r zrange ztmp 0 -1]
+        }
+
+        test "ZADDCMPCAPREV - Variadic version - $encoding" {
+            r del ztmp
+            r zadd ztmp 40 x
+            r zaddcmpcaprev ztmp 2 30 z 20 y 10 x min
+            assert_equal {x y} [r zrange ztmp 0 -1]
         }
 
         test "ZADDCAP - Variadic version - $encoding" {
