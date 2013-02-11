@@ -164,6 +164,8 @@ struct redisCommand redisCommandTable[] = {
     {"zadd",zaddCommand,-4,"wm",0,NULL,1,1,1,0,0},
     {"zaddnx",zaddnxCommand,-4,"wm",0,NULL,1,1,1,0,0},
     {"zaddcmp",zaddcmpCommand,-4,"wm",0,NULL,1,1,1,0,0},
+    {"zaddcmpcap",zaddcmpcapCommand,-5,"wm",0,NULL,1,1,1,0,0},
+    {"zaddcmpcaprev",zaddcmpcaprevCommand,-5,"wm",0,NULL,1,1,1,0,0},
     {"zaddcap",zaddcapCommand,-5,"wm",0,NULL,1,1,1,0,0},
     {"zaddcaprev",zaddcaprevCommand,-5,"wm",0,NULL,1,1,1,0,0},
     {"zincrby",zincrbyCommand,4,"wm",0,NULL,1,1,1,0,0},

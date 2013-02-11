@@ -1133,6 +1133,8 @@ void msetnxCommand(redisClient *c);
 void zaddCommand(redisClient *c);
 void zaddnxCommand(redisClient *c);
 void zaddcmpCommand(redisClient *c);
+void zaddcmpcapCommand(redisClient *c);
+void zaddcmpcaprevCommand(redisClient *c);
 void zaddcapCommand(redisClient *c);
 void zaddcaprevCommand(redisClient *c);
 void zincrbyCommand(redisClient *c);

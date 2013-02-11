@@ -850,9 +850,11 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp, int cap) {
     int j, elements = (c->argc-(cap?3:2))/2;
     int added = 0;
     long capLen = 0;
+    int cmp_argc = 0;
 
     if (cmp) {
-        if (c->argc % 2) {
+        if (c->argc % 2 == !cap) {
+            cmp_argc = 1;
             if (!strcasecmp(c->argv[c->argc-1]->ptr,"min"))
                 cmp = -1;
             else if (!strcasecmp(c->argv[c->argc-1]->ptr,"max"))
@@ -862,15 +864,23 @@ void zaddGenericCommand(redisClient *c, int incr, int nx, int cmp, int cap) {
                 return;
             }
         }
-    } else {
-        if (cap && getLongFromObjectOrReply(c, c->argv[2], &capLen, NULL) != REDIS_OK)
+    }
+
+    if (cap) {
+        if (getLongFromObjectOrReply(c, c->argv[2], &capLen, NULL) != REDIS_OK)
             return;
 
-        if ((c->argc + (cap?1:0)) % 2 || (cap && capLen < 1)) {
+        if ((c->argc + 1 + cmp_argc) % 2 || capLen < 1) {
+            addReply(c,shared.syntaxerr);
+            return;
+        }
+    } else {
+        if (!cmp && (c->argc % 2)) {
             addReply(c,shared.syntaxerr);
             return;
         }
     }
+
 
     /* Start parsing all the scores, we need to emit any syntax error
      * before executing additions to the sorted set, as the command should
@@ -1045,6 +1055,14 @@ void zaddnxCommand(redisClient *c) {
 
 void zaddcmpCommand(redisClient *c) {
     zaddGenericCommand(c,0,0,1,0);
+}
+
+void zaddcmpcapCommand(redisClient *c) {
+    zaddGenericCommand(c,0,0,1,1);
+}
+
+void zaddcmpcaprevCommand(redisClient *c) {
+    zaddGenericCommand(c,0,0,1,2);
 }
 
 void zincrbyCommand(redisClient *c) {
