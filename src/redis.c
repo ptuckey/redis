@@ -543,7 +543,7 @@ dictType commandTableDictType = {
     NULL                       /* val destructor */
 };
 
-/* Hash type hash table (note that small hashes are represented with zipmaps) */
+/* Hash type hash table (note that small hashes are represented with ziplists) */
 dictType hashDictType = {
     dictEncObjHash,             /* hash function */
     NULL,                       /* key dup */
@@ -1100,6 +1100,7 @@ void initServerConfig() {
     server.dbnum = REDIS_DEFAULT_DBNUM;
     server.verbosity = REDIS_NOTICE;
     server.maxidletime = REDIS_MAXIDLETIME;
+    server.tcpkeepalive = 0;
     server.client_max_querybuf_len = REDIS_MAX_QUERYBUF_LEN;
     server.saveparams = NULL;
     server.loading = 0;
