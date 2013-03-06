@@ -68,11 +68,21 @@ void loadServerConfigFromString(char *config) {
         linenum = i+1;
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
-        /* Skip comments and blank lines*/
+        /* Skip comments and blank lines */
         if (lines[i][0] == '#' || lines[i][0] == '\0') continue;
 
         /* Split into arguments */
         argv = sdssplitargs(lines[i],&argc);
+        if (argv == NULL) {
+            err = "Unbalanced quotes in configuration line";
+            goto loaderr;
+        }
+
+        /* Skip this line if the resulting command vector is empty. */
+        if (argc == 0) {
+            sdsfreesplitres(argv,argc);
+            return;
+        }
         sdstolower(argv[0]);
 
         /* Execute config directives */
