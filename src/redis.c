@@ -214,7 +214,7 @@ struct redisCommand redisCommandTable[] = {
     {"pexpireat",pexpireatCommand,3,"w",0,NULL,1,1,1,0,0},
     {"keys",keysCommand,2,"rS",0,NULL,0,0,0,0,0},
     {"dbsize",dbsizeCommand,1,"r",0,NULL,0,0,0,0,0},
-    {"auth",authCommand,2,"rs",0,NULL,0,0,0,0,0},
+    {"auth",authCommand,2,"rsl",0,NULL,0,0,0,0,0},
     {"ping",pingCommand,1,"r",0,NULL,0,0,0,0,0},
     {"echo",echoCommand,2,"r",0,NULL,0,0,0,0,0},
     {"save",saveCommand,1,"ars",0,NULL,0,0,0,0,0},
@@ -1193,6 +1193,7 @@ void initServerConfig() {
      * initial configuration, since command names may be changed via
      * redis.conf using the rename-command directive. */
     server.commands = dictCreate(&commandTableDictType,NULL);
+    server.orig_commands = dictCreate(&commandTableDictType,NULL);
     populateCommandTable();
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
@@ -1382,7 +1383,7 @@ void populateCommandTable(void) {
     for (j = 0; j < numcommands; j++) {
         struct redisCommand *c = redisCommandTable+j;
         char *f = c->sflags;
-        int retval;
+        int retval1, retval2;
 
         while(*f != '\0') {
             switch(*f) {
@@ -1403,8 +1404,11 @@ void populateCommandTable(void) {
             f++;
         }
 
-        retval = dictAdd(server.commands, sdsnew(c->name), c);
-        assert(retval == DICT_OK);
+        retval1 = dictAdd(server.commands, sdsnew(c->name), c);
+        /* Populate an additional dictionary that will be unaffected
+         * by rename-command statements in redis.conf. */
+        retval2 = dictAdd(server.orig_commands, sdsnew(c->name), c);
+        redisAssert(retval1 == DICT_OK && retval2 == DICT_OK);
     }
 }
 
@@ -1469,6 +1473,20 @@ struct redisCommand *lookupCommandByCString(char *s) {
 
     cmd = dictFetchValue(server.commands, name);
     sdsfree(name);
+    return cmd;
+}
+
+/* Lookup the command in the current table, if not found also check in
+ * the original table containing the original command names unaffected by
+ * redis.conf rename-command statement.
+ *
+ * This is used by functions rewriting the argument vector such as
+ * rewriteClientCommandVector() in order to set client->cmd pointer
+ * correctly even if the command was renamed. */
+struct redisCommand *lookupCommandOrOriginal(sds name) {
+    struct redisCommand *cmd = dictFetchValue(server.commands, name);
+
+    if (!cmd) cmd = dictFetchValue(server.orig_commands,name);
     return cmd;
 }
 
