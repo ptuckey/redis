@@ -405,7 +405,7 @@ void initSentinel(void) {
     /* Initialize various data structures. */
     sentinel.masters = dictCreate(&instancesDictType,NULL);
     sentinel.tilt = 0;
-    sentinel.tilt_start_time = mstime();
+    sentinel.tilt_start_time = 0;
     sentinel.previous_time = mstime();
     sentinel.running_scripts = 0;
     sentinel.scripts_queue = listCreate();
@@ -1132,7 +1132,6 @@ int sentinelResetMastersByPattern(char *pattern, int flags) {
  * TODO: make this reset so that original sentinels are re-added with
  * same ip / port / runid.
  */
-
 int sentinelResetMasterAndChangeAddress(sentinelRedisInstance *master, char *ip, int port) {
     sentinelAddr *oldaddr, *newaddr;
 
@@ -1141,10 +1140,24 @@ int sentinelResetMasterAndChangeAddress(sentinelRedisInstance *master, char *ip,
     sentinelResetMaster(master,SENTINEL_NO_FLAGS);
     oldaddr = master->addr;
     master->addr = newaddr;
+    master->o_down_since_time = 0;
+    master->s_down_since_time = 0;
+
     /* Release the old address at the end so we are safe even if the function
      * gets the master->addr->ip and master->addr->port as arguments. */
     releaseSentinelAddr(oldaddr);
     return REDIS_OK;
+}
+
+/* Return non-zero if there was no SDOWN or ODOWN error associated to this
+ * instance in the latest 'ms' milliseconds. */
+int sentinelRedisInstanceNoDownFor(sentinelRedisInstance *ri, mstime_t ms) {
+    mstime_t most_recent;
+
+    most_recent = ri->s_down_since_time;
+    if (ri->o_down_since_time > most_recent)
+        most_recent = ri->o_down_since_time;
+    return most_recent == 0 || (mstime() - most_recent) > ms;
 }
 
 /* ============================ Config handling ============================= */
@@ -1448,10 +1461,13 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
     ri->info_refresh = mstime();
     sdsfreesplitres(lines,numlines);
 
-    /* ---------------------------- Acting half ----------------------------- */
-    if (sentinel.tilt) return;
+    /* ---------------------------- Acting half -----------------------------
+     * Some things will not happen if sentinel.tilt is true, but some will
+     * still be processed. */
 
-    /* Act if a master turned into a slave. */
+    /* When what we believe is our master, turned into a slave, the wiser
+     * thing we can do is to follow the events and redirect to the new
+     * master, always. */
     if ((ri->flags & SRI_MASTER) && role == SRI_SLAVE && ri->slave_master_host)
     {
         sentinelEvent(REDIS_WARNING,"+redirect-to-master",ri,
@@ -1460,40 +1476,65 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
             ri->slave_master_host, ri->slave_master_port);
         sentinelResetMasterAndChangeAddress(ri,ri->slave_master_host,
                                                ri->slave_master_port);
-        return;
+        return; /* Don't process anything after this event. */
     }
 
-    /* Act if a slave turned into a master. */
+    /* Handle slave -> master role switch. */
     if ((ri->flags & SRI_SLAVE) && role == SRI_MASTER) {
-        if (ri->flags & SRI_DEMOTE) {
-            int retval;
+        if (!sentinel.tilt && ri->flags & SRI_DEMOTE) {
+            /* If this sentinel was partitioned from the slave's master,
+             * or tilted recently, wait some time before to act,
+             * so that DOWN and roles INFO will be refreshed. */
+            mstime_t wait_time = SENTINEL_INFO_PERIOD*2 +
+                                 ri->master->down_after_period*2;
 
-            /* Old master returned back? Turn it into a slave ASAP.
-             * We'll clear this flag only when we have the acknowledge
-             * that it's a slave again. */
-            retval = redisAsyncCommand(ri->cc,
-                sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %d",
-                    ri->master->addr->ip,
-                    ri->master->addr->port);
-            if (retval == REDIS_OK)
-                sentinelEvent(REDIS_NOTICE,"+demote-old-slave",ri,"%@");
+            if (!sentinelRedisInstanceNoDownFor(ri->master,wait_time) ||
+                (mstime()-sentinel.tilt_start_time) < wait_time)
+                return;
+
+            /* Old master returned back? Turn it into a slave ASAP if
+             * we can reach what we believe is the new master now, and
+             * have a recent role information for it.
+             *
+             * Note: we'll clear the DEMOTE flag only when we have the
+             * acknowledge that it's a slave again. */
+            if (ri->master->flags & SRI_MASTER &&
+                (ri->master->flags & (SRI_S_DOWN|SRI_O_DOWN)) == 0 &&
+                (mstime() - ri->master->info_refresh) < SENTINEL_INFO_PERIOD*2)
+            {
+                int retval;
+                retval = redisAsyncCommand(ri->cc,
+                    sentinelDiscardReplyCallback, NULL, "SLAVEOF %s %d",
+                        ri->master->addr->ip,
+                        ri->master->addr->port);
+                if (retval == REDIS_OK)
+                    sentinelEvent(REDIS_NOTICE,"+demote-old-slave",ri,"%@");
+            } else {
+                /* Otherwise if there are not the conditions to demote, we
+                 * no longer trust the DEMOTE flag and remove it. */
+                ri->flags &= ~SRI_DEMOTE;
+                sentinelEvent(REDIS_NOTICE,"-demote-flag-cleared",ri,"%@");
+            }
         } else if (!(ri->master->flags & SRI_FAILOVER_IN_PROGRESS) &&
-            (runid_changed || first_runid))
+                    (runid_changed || first_runid))
         {
             /* If a slave turned into master but:
              *
              * 1) Failover not in progress.
-             * 2) RunID hs changed, or its the first time we see an INFO output.
+             * 2) RunID has changed or its the first time we see an INFO output.
              * 
              * We assume this is a reboot with a wrong configuration.
-             * Log the event and remove the slave. */
+             * Log the event and remove the slave. Note that this is processed
+             * in tilt mode as well, otherwise we lose the information that the
+             * runid changed (reboot?) and when the tilt mode ends a fake
+             * failover will be detected. */
             int retval;
 
             sentinelEvent(REDIS_WARNING,"-slave-restart-as-master",ri,"%@ #removing it from the attached slaves");
             retval = dictDelete(ri->master->slaves,ri->name);
             redisAssert(retval == REDIS_OK);
             return;
-        } else if (ri->flags & SRI_PROMOTED) {
+        } else if (!sentinel.tilt && ri->flags & SRI_PROMOTED) {
             /* If this is a promoted slave we can change state to the
              * failover state machine. */
             if ((ri->master->flags & SRI_FAILOVER_IN_PROGRESS) &&
@@ -1509,11 +1550,12 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                 sentinelCallClientReconfScript(ri->master,SENTINEL_LEADER,
                     "start",ri->master->addr,ri->addr);
             }
-        } else if (!(ri->master->flags & SRI_FAILOVER_IN_PROGRESS) ||
-                    ((ri->master->flags & SRI_FAILOVER_IN_PROGRESS) &&
-                     (ri->master->flags & SRI_I_AM_THE_LEADER) &&
-                     ri->master->failover_state ==
-                     SENTINEL_FAILOVER_STATE_WAIT_START))
+        } else if (!sentinel.tilt && (
+                    !(ri->master->flags & SRI_FAILOVER_IN_PROGRESS) ||
+                     ((ri->master->flags & SRI_FAILOVER_IN_PROGRESS) &&
+                      (ri->master->flags & SRI_I_AM_THE_LEADER) &&
+                       ri->master->failover_state ==
+                       SENTINEL_FAILOVER_STATE_WAIT_START)))
         {
             /* No failover in progress? Then it is the start of a failover
              * and we are an observer.
@@ -1533,6 +1575,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
             ri->master->failover_state_change_time = mstime();
             ri->master->promoted_slave = ri;
             ri->flags |= SRI_PROMOTED;
+            ri->flags &= ~SRI_DEMOTE;
             sentinelCallClientReconfScript(ri->master,SENTINEL_OBSERVER,
                 "start", ri->master->addr,ri->addr);
             /* We are an observer, so we can only assume that the leader
@@ -1543,6 +1586,10 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                 SRI_RECONF_SENT);
         }
     }
+
+    /* None of the following conditions are processed when in tilt mode, so
+     * return asap. */
+    if (sentinel.tilt) return;
 
     /* Detect if the slave that is in the process of being reconfigured
      * changed state. */
@@ -1575,7 +1622,8 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
         }
     }
 
-    /* Detect if the old master was demoted as slave. */
+    /* Detect if the old master was demoted as slave and generate the
+     * +slave event. */
     if (role == SRI_SLAVE && ri->flags & SRI_DEMOTE) {
         sentinelEvent(REDIS_NOTICE,"+slave",ri,"%@");
         ri->flags &= ~SRI_DEMOTE;
