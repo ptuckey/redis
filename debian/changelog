@@ -1,3 +1,9 @@
+redis (2:2.6.14-2rdio1) unstable; urgency=low
+
+  * Resync with upstream packaging
+
+ -- Manish Singh <manish@rd.io>  Wed, 14 Aug 2013 07:28:29 -0700
+
 redis (2:2.6.14-1rdio1) unstable; urgency=low
 
   * New upstream release
