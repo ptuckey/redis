@@ -9,7 +9,7 @@ start_server {
         foreach entry $entries { r sadd $key $entry }
     }
 
-    test {SADD, SCARD, SISMEMBER, SMEMBERS basics - regular set} {
+    test {SADD, SCARD, SISMEMBER, SAREMEMBERS, SMEMBERS basics - regular set} {
         create_set myset {foo}
         assert_encoding hashtable myset
         assert_equal 1 [r sadd myset bar]
@@ -18,10 +18,11 @@ start_server {
         assert_equal 1 [r sismember myset foo]
         assert_equal 1 [r sismember myset bar]
         assert_equal 0 [r sismember myset bla]
+        assert_equal {foo bar} [r saremembers myset foo bar bla]
         assert_equal {bar foo} [lsort [r smembers myset]]
     }
 
-    test {SADD, SCARD, SISMEMBER, SMEMBERS basics - intset} {
+    test {SADD, SCARD, SISMEMBER, SAREMEMBERS, SMEMBERS basics - intset} {
         create_set myset {17}
         assert_encoding intset myset
         assert_equal 1 [r sadd myset 16]
@@ -30,6 +31,7 @@ start_server {
         assert_equal 1 [r sismember myset 16]
         assert_equal 1 [r sismember myset 17]
         assert_equal 0 [r sismember myset 18]
+        assert_equal {17 16} [r saremembers myset 17 16 18]
         assert_equal {16 17} [lsort [r smembers myset]]
     }
 

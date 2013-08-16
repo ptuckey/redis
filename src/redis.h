@@ -1116,6 +1116,7 @@ void saddCommand(redisClient *c);
 void sremCommand(redisClient *c);
 void smoveCommand(redisClient *c);
 void sismemberCommand(redisClient *c);
+void saremembersCommand(redisClient *c);
 void scardCommand(redisClient *c);
 void spopCommand(redisClient *c);
 void srandmemberCommand(redisClient *c);
