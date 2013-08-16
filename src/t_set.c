@@ -353,6 +353,26 @@ void sismemberCommand(redisClient *c) {
         addReply(c,shared.czero);
 }
 
+void saremembersCommand(redisClient *c) {
+    robj *set;
+    void *replylen;
+    unsigned long j, total = 0;
+
+    if ((set = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
+        checkType(c,set,REDIS_SET)) return;
+
+    replylen = addDeferredMultiBulkLength(c);
+
+    for (j = 2; j < c->argc; j++) {
+        if (setTypeIsMember(set,c->argv[j])) {
+            addReplyBulk(c,c->argv[j]);
+            total++;
+        }
+    }
+
+    setDeferredMultiBulkLength(c,replylen,total);
+}
+
 void scardCommand(redisClient *c) {
     robj *o;
 

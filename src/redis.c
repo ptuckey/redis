@@ -151,6 +151,7 @@ struct redisCommand redisCommandTable[] = {
     {"srem",sremCommand,-3,"w",0,NULL,1,1,1,0,0},
     {"smove",smoveCommand,4,"w",0,NULL,1,2,1,0,0},
     {"sismember",sismemberCommand,3,"r",0,NULL,1,1,1,0,0},
+    {"saremembers",saremembersCommand,-3,"r",0,NULL,1,1,1,0,0},
     {"scard",scardCommand,2,"r",0,NULL,1,1,1,0,0},
     {"spop",spopCommand,2,"wRs",0,NULL,1,1,1,0,0},
     {"srandmember",srandmemberCommand,-2,"rR",0,NULL,1,1,1,0,0},
