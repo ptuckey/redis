@@ -1,3 +1,9 @@
+redis (2:2.6.15-1rdio1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Manish Singh <manish@rd.io>  Sat, 24 Aug 2013 14:41:20 -0700
+
 redis (2:2.6.14-2rdio2) unstable; urgency=low
 
   * New SAREMEMBERS command
